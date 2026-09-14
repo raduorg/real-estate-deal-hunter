@@ -1,12 +1,33 @@
 [project]
-name = "real-estate-ai-system"
+name = "real-estate-ai-agent"
 version = "0.1.0"
-description = "A real estate AI system"
-requires-python = "== 3.9.*"
+description = "Automated real estate deal finder for Romanian property market"
+requires-python = ">=3.10"
 dependencies = [
-    # uv will populate this with 'crewai-tools', 'crewai', 'mcp', 'python-dotenv', 'pandas'
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0",
+    "beautifulsoup4>=4.12.0",
+    "lxml>=5.0",
+    "aiohttp>=3.9",
+    "aiosqlite>=0.19",
+    "openai>=1.10",
+    "httpx>=0.27",
 ]
 
-[tool.uv]
-# You can add uv specific configurations here if needed,
-# but for now, just having the [project] section is enough.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.3",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
