@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import logging
 import re
-from urllib.parse import urlparse
+from datetime import datetime
+from email.utils import parsedate_to_datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -16,9 +19,17 @@ _PRICE_RE = re.compile(r"([\d.]+)\s*(eur|€|euro|lei|ron)", re.IGNORECASE)
 _SQM_RE = re.compile(r"(\d+)\s*m[²2]")
 _ROOMS_RE = re.compile(r"(\d+)\s*camer[ăa]|(\d+)\s*room", re.IGNORECASE)
 
+# Tracking/redirect link domains used by portal email alerts.
+_TRACKING_HOSTS = (
+    "link.imobiliare.ro",
+    "clicks.alerts.storia.ro",
+)
+# Recognised listing path markers (used to validate resolved URLs).
+_LISTING_PATH_RE = re.compile(r"/(?:oferta|ro/oferta|autobuz)/|\d{6,}$")
+
 
 def _source_from_url(url: str) -> ListingSource:
-    host = urlparse(url).hostname or ""
+    host = urlsplit(url).hostname or ""
     if "imobiliare" in host:
         return ListingSource.IMOBILIARE
     if "storia" in host:
@@ -31,7 +42,18 @@ def _source_from_url(url: str) -> ListingSource:
 
 
 def _make_id(url: str) -> str:
-    return hashlib.sha256(url.encode()).hexdigest()[:16]
+    return hashlib.sha256(normalize_listing_url(url).encode()).hexdigest()[:16]
+
+
+# Query params injected by email tracking redirects; not part of a listing identity.
+_TRACKING_PARAMS = {"lid", "utm_source", "utm_medium", "utm_campaign", "utm_id", "utm_content"}
+
+
+def normalize_listing_url(url: str) -> str:
+    """Strip email-tracking query params so identical listings deduplicate."""
+    parts = urlsplit(url)
+    keep = [(k, v) for k, v in parse_qsl(parts.query) if k not in _TRACKING_PARAMS]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(keep), parts.fragment))
 
 
 def _parse_price(text: str) -> int | None:
@@ -58,22 +80,53 @@ def _parse_rooms(text: str) -> int | None:
     return int(m.group(1) or m.group(2))
 
 
+def decode_imobiliare_tracking(url: str) -> str | None:
+    """Decode the base64-encoded target from a link.imobiliare.ro/click/... URL.
+
+    Only `/click/` links point at portal pages; `/external/` links are social
+    media profile URLs and are rejected.
+    """
+    path = urlsplit(url).path
+    # require /click/<id>/<b64> (not /external/<id>/<b64>)
+    if "/click/" not in path:
+        return None
+    m = re.search(r"/click/[^/]+/([A-Za-z0-9_=-]+)", path)
+    if not m:
+        return None
+    b64 = m.group(1)
+    try:
+        decoded = base64.urlsafe_b64decode(b64 + "=" * (-len(b64) % 4)).decode("utf-8", "replace")
+    except Exception:
+        return None
+    if not decoded.startswith("http"):
+        return None
+    return decoded
+
+
+def is_tracking_url(url: str) -> bool:
+    host = urlsplit(url).hostname or ""
+    return host in _TRACKING_HOSTS
+
+
 def extract_listing_urls(html: str) -> list[str]:
+    """Collect listing URLs + tracking links from an alert email."""
     soup = BeautifulSoup(html, "lxml")
     urls = set()
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
-        if _looks_like_listing_url(href):
+        if _looks_like_listing_url(href) or is_tracking_url(href):
             urls.add(href)
     return list(urls)
 
 
 def _looks_like_listing_url(url: str) -> bool:
-    host = urlparse(url).hostname or ""
+    host = urlsplit(url).hostname or ""
     is_portal = any(
         d in host for d in ("imobiliare.ro", "storia.ro", "olx.ro", "publi24.ro", "olx.pl")
     )
-    path = urlparse(url).path
+    if is_tracking_url(url):
+        return True
+    path = urlsplit(url).path
     has_id = bool(re.search(r"/\d+$", path)) or bool(re.search(r"/oferta/", path))
     return is_portal and has_id
 
@@ -88,25 +141,46 @@ def parse_email(
         logger.debug("No listing URLs found in email")
         return []
 
-    listings = []
     soup = BeautifulSoup(html, "lxml")
-    text = soup.get_text(separator=" ")
+    return build_listings(urls, soup.get_text(separator=" "), subject, email_date)
 
+
+def _parse_email_date(raw: str | None) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone()  # normalize to local tz (matches datetime.now())
+
+
+def build_listings(
+    urls: list[str],
+    text: str,
+    subject: str = "",
+    email_date: str | None = None,
+) -> list[Listing]:
     price = _parse_price(text)
     sqm = _parse_sqm(text)
     rooms = _parse_rooms(text)
+    parsed_date = _parse_email_date(email_date)
 
+    listings = []
     for url in urls:
+        clean_url = normalize_listing_url(url)
         listing = Listing(
             id=_make_id(url),
-            url=url,
+            url=clean_url,
             source=_source_from_url(url),
             title=subject[:200],
             price_eur=price,
             sqm=sqm,
             rooms=rooms,
             email_subject=subject,
-            email_date=email_date,
+            email_date=parsed_date,
         )
         listings.append(listing)
 

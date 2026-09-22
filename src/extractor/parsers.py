@@ -58,11 +58,19 @@ _LOCATION_KEYS = {
         "district",
         "sector",
         "zone",
-        "area",
         "cartier",
+        # "area" is ambiguous (often usable sqm) — handled via _is_location_value.
     },
     "address": {"address", "street", "streetaddress", "displayaddress"},
 }
+
+# A neighborhood/city/address is text; reject pure numbers and sqm-style values
+# (e.g. storia's `"Area":"39.36"`), which would otherwise leak into `neighborhood`.
+_LOCATION_VALUE_RE = re.compile(r"^\d+(?:[.,]\d+)?\s*(?:m[²2]|m²|mp)?$", re.IGNORECASE)
+
+
+def _is_location_value(value: str) -> bool:
+    return bool(value) and not _LOCATION_VALUE_RE.match(value.strip())
 
 _CURRENCY = r"(?:eur|€|euro|lei|ron)"
 # "89.000 Euro", "89.000 €", "89 000 EUR", "€ 89.000" — currency required, avoids phone/date noise.
@@ -496,7 +504,7 @@ def _string_key(d: dict, key: str) -> str:
 def _string_key_from_json(nodes: list[Any], keys: set[str]) -> str:
     for node in nodes:
         for key, value in _iter_scalars(node):
-            if key.lower() in keys:
+            if key.lower() in keys and isinstance(value, str) and _is_location_value(value):
                 return _clean(value)
     return ""
 

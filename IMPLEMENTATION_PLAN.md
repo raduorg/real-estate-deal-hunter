@@ -12,7 +12,7 @@ only where unstructured perception is strictly needed (zone fallback + vision).
 | 2 | Extraction (HTML/API) | Pure Code (BeautifulSoup / Regex) | Prices, surface area, lat/long from `<script>` tags are zero-cost |
 | 3 | Zone Verification | Code First, LLM Fallback | Shapely point-in-polygon vs GeoJSON ($0, ~10ms); gpt-4o-mini fallback for street names |
 | 4 | Early-Exit Filter | Pure Code (Math) | Asking price/sqm >30% above zone ceiling → drop immediately, no vision spend |
-| 5 | Vision Evaluation | Structured Multimodal Call | Single inference pass (gemini-1.5-flash / gpt-4o-mini) with rigid JSON schema |
+| 5 | Vision Evaluation | Structured Multimodal Call | Single inference pass (local **Ollama gemma4:26b**) with rigid JSON schema |
 | 6 | Valuation & ROI | Pure Code (Formula) | Financial math in Python; LLMs make arithmetic errors |
 | 7 | Telegram / WhatsApp Alert | Pure Code (HTTP POST) | Simple webhook to dispatch the alert |
 
@@ -101,43 +101,43 @@ This is the highest-risk layer — portal HTML changes. Flexible selectors + mul
 
 Code-first geospatial check; LLM only as fallback.
 
-- [ ] Create `src/geocoding/` package
-- [ ] Obtain/produce Bucharest zone boundaries as GeoJSON (neighborhood polygons)
-- [ ] Shapely point-in-polygon: `canonical_zone` + `zone_avg_price_sqm` (~10ms, $0)
-- [ ] Zone ceiling price table (per-zone avg EUR/sqm) seeded + configurable
+- [x] Create `src/geocoding/` package
+- [x] Obtain/produce Bucharest zone boundaries as GeoJSON (neighborhood polygons)
+- [x] Shapely point-in-polygon: `canonical_zone` + `zone_avg_price_sqm` (~10ms, $0)
+- [x] Zone ceiling price table (per-zone avg EUR/sqm) seeded + configurable
 - [ ] If no coordinates: gpt-4o-mini fallback to extract street name from text
-- [ ] Store zone result in `ListingState` + DB
+- [ ] Store zone result in `ListingState` + DB (pending LangGraph wiring)
 
 ## Stage 4: Early-Exit Filter
 
 Deterministic math gate — no vision spend for obvious dumps.
 
-- [ ] Implement `is_financially_viable`: asking price/sqm > zone ceiling × 1.30 → reject
-- [ ] Optional second gate: price/sqm far below floor → flag for manual review (possible scam)
+- [x] Implement `is_financially_viable`: asking price/sqm > zone ceiling × 1.30 → reject
+- [x] Optional second gate: price/sqm far below floor → flag for manual review (possible scam)
 - [ ] Wire as LangGraph conditional edge `should_evaluate`
 
 ## Stage 5: Vision Evaluation
 
 One structured multimodal inference per surviving listing. Not an agent — an API call.
 
-- [ ] Create `src/vision_evaluator/evaluator.py` + `prompts.py`
-- [ ] Single inference pass over 5–15 images (gemini-1.5-flash primary, gpt-4o-mini fallback)
-- [ ] Rigid JSON schema output:
+- [x] Create `src/vision_evaluator/evaluator.py` + `prompts.py`
+- [x] Single inference pass over 5–15 images (local **Ollama gemma4:26b**; openai/gemini keys retained as unused fallbacks)
+- [x] Rigid JSON schema output (Ollama `format` + client-side validation/defaults):
   - `condition_tier`: needs_total_renovation / habitable_dated / renovated_standard / luxury
-  - `estimated_renovation_eur_per_sqm`
+  - `estimated_renovation_cost_eur_per_sqm`
   - `heating_type_visible`, `window_type`
   - `deal_breakers[]`, `image_score`
-- [ ] Retry + exponential backoff on API rate limits
-- [ ] Image quality validation + skip broken images
+- [x] Retry + exponential backoff on rate limits / HTTP errors / malformed JSON
+- [x] Image quality validation + skip broken images (`src/vision_evaluator/images.py`)
 
 ## Stage 6: Valuation & Deal Scoring
 
 Pure arithmetic.
 
-- [ ] `adjusted_price_per_sqm = (price + est_renovation) / sqm`
-- [ ] Compare vs `zone_avg_price_sqm` → `discount_percentage`
-- [ ] `is_deal = discount_percentage > deal_threshold`
-- [ ] `deal_score` (configurable weighted blend of discount + condition tier)
+- [x] `adjusted_price_per_sqm = (price + est_renovation) / sqm`
+- [x] Compare vs `zone_avg_price_sqm` → `discount_percentage`
+- [x] `is_deal = discount_percentage > deal_threshold`
+- [x] `deal_score` (configurable weighted blend of discount + condition tier)
 
 ## Stage 7: Notification Dispatch
 
@@ -171,7 +171,8 @@ Plain HTTP POST webhook.
 ## Dependencies / Tools
 
 - Zoho Mail IMAP (imap.zoho.eu) — configured live
-- OpenAI: gpt-4o-mini (vision + zone fallback); Gemini 1.5 Flash (primary vision, cheap)
+- OpenAI: gpt-4o-mini (zone street fallback; optional vision fallback) — **not required**: vision runs on local Ollama
+- Ollama + gemma4:26b (vision, offline, free)
 - LangGraph, Shapely, BeautifulSoup, Pydantic
 - GeoJSON zone boundaries for Bucharest (hand-curated / OSM)
 - Telegram bot token
@@ -179,7 +180,7 @@ Plain HTTP POST webhook.
 
 ## Budget (Pattern A — no proxy/scraper spend)
 
-- Vision: ~$0.0005–0.002 per listing (only for listings that pass early exit)
+- Vision: **$0** locally via Ollama (gemma4:26b). Runs on your machine/GPU; VPS needs ~24GB VRAM or CPU-offload (slow)
 - Zone fallback: ~$0 negligible
 - Hosting: ~$5–20/mo VPS (or run on the dev machine)
 - **Total: well under $25/mo** — dramatically cheaper than the original $100–150 projection
@@ -197,5 +198,7 @@ Plain HTTP POST webhook.
 
 1. ~~Start **Stage 2: Extraction & Enrichment**~~ — implemented; validate multi-pass parsers against real pages once live alert URLs flow in
 2. Meanwhile configure real portal alert emails to exercise Stage 1 live
-3. Build Stage 3–4 (zone verification + early exit) — pure code, no API keys needed beyond current
-4. Wire LangGraph orchestration (Stage 8) incrementally as nodes land
+3. ~~Build Stage 3–4 (zone verification + early exit)~~ — implemented with `src/geocoding/`
+4. ~~Stage 5 vision (local Ollama gemma4)~~ — implemented with `src/vision_evaluator/`; smoke-tested live
+5. Wire LangGraph orchestration (Stage 8) incrementally as nodes land
+6. ~~Build Stage 6 (valuation/deal score)~~ — implemented with `src/deal_calculator/valuator.py`; ready to wire into the graph

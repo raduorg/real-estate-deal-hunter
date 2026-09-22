@@ -18,6 +18,16 @@ class EmailConfig:
 
 @dataclass(frozen=True)
 class VisionConfig:
+    """Stage 5 multimodal evaluation via local Ollama (free, offline)."""
+
+    ollama_host: str = "http://127.0.0.1:11434"
+    ollama_model: str = "gemma4:26b"
+    timeout: float = 300.0
+    max_retries: int = 3
+    max_images: int = 10
+    image_timeout: float = 20.0
+    max_image_bytes: int = 15 * 1024 * 1024
+    temperature: float = 0.2
     openai_api_key: str = ""
     google_ai_api_key: str = ""
 
@@ -42,11 +52,33 @@ class ExtractorConfig:
 
 
 @dataclass(frozen=True)
+class ZoneConfig:
+    """Stage 3-4 geospatial verification and early-exit math gate."""
+
+    geojson_path: Path = field(default_factory=lambda: Path("data/zones/bucharest_sectors.geojson"))
+    ceiling_multiplier: float = 1.30
+    floor_multiplier: float = 0.50
+    fallback_city: str = "Bucuresti"
+
+
+@dataclass(frozen=True)
+class DealConfig:
+    """Stage 6 valuation & deal scoring thresholds (pure arithmetic)."""
+
+    deal_threshold_percent: float = 10.0
+    max_discount_percent: float = 40.0
+    discount_weight: float = 0.80
+    condition_weight: float = 0.20
+
+
+@dataclass(frozen=True)
 class Config:
     email: EmailConfig
     vision: VisionConfig
     target: TargetConfig
     extractor: ExtractorConfig = field(default_factory=ExtractorConfig)
+    zones: ZoneConfig = field(default_factory=ZoneConfig)
+    deals: DealConfig = field(default_factory=DealConfig)
     database_path: Path = field(default_factory=lambda: Path("data/listings.db"))
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -72,6 +104,14 @@ def load_config(env_path: str | Path | None = None) -> Config:
             poll_interval=int(os.getenv("EMAIL_POLL_INTERVAL_SECONDS", "60")),
         ),
         vision=VisionConfig(
+            ollama_host=os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434").rstrip("/"),
+            ollama_model=os.getenv("OLLAMA_VISION_MODEL", "gemma4:26b"),
+            timeout=float(os.getenv("VISION_TIMEOUT_SECONDS", "300")),
+            max_retries=int(os.getenv("VISION_MAX_RETRIES", "3")),
+            max_images=int(os.getenv("VISION_MAX_IMAGES", "10")),
+            image_timeout=float(os.getenv("VISION_IMAGE_TIMEOUT_SECONDS", "20")),
+            max_image_bytes=int(os.getenv("VISION_MAX_IMAGE_BYTES", str(15 * 1024 * 1024))),
+            temperature=float(os.getenv("VISION_TEMPERATURE", "0.2")),
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             google_ai_api_key=os.getenv("GOOGLE_AI_API_KEY", ""),
         ),
@@ -87,6 +127,20 @@ def load_config(env_path: str | Path | None = None) -> Config:
             max_retries=int(os.getenv("FETCH_MAX_RETRIES", "3")),
             max_images=int(os.getenv("MAX_IMAGES_PER_LISTING", "15")),
             proxy_url=os.getenv("PROXY_URL", ""),
+        ),
+        zones=ZoneConfig(
+            geojson_path=Path(
+                os.getenv("ZONE_BOUNDARIES_PATH", "data/zones/bucharest_sectors.geojson")
+            ),
+            ceiling_multiplier=float(os.getenv("EARLY_EXIT_CEILING_MULTIPLIER", "1.30")),
+            floor_multiplier=float(os.getenv("EARLY_EXIT_FLOOR_MULTIPLIER", "0.50")),
+            fallback_city=os.getenv("ZONE_FALLBACK_CITY", "Bucuresti"),
+        ),
+        deals=DealConfig(
+            deal_threshold_percent=float(os.getenv("DEAL_THRESHOLD_PERCENT", "10")),
+            max_discount_percent=float(os.getenv("DEAL_MAX_DISCOUNT_PERCENT", "40")),
+            discount_weight=float(os.getenv("DEAL_DISCOUNT_WEIGHT", "0.80")),
+            condition_weight=float(os.getenv("DEAL_CONDITION_WEIGHT", "0.20")),
         ),
         database_path=Path(os.getenv("DATABASE_PATH", "data/listings.db")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),

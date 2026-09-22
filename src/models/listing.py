@@ -62,3 +62,5 @@ class DealScore(BaseModel):
     discount_percentage: float = 0.0
     is_deal: bool = False
     total_renovation_cost: int = 0
+    deal_score: float = 0.0
+    condition_tier: str = "unknown"

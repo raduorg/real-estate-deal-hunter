@@ -8,7 +8,11 @@ import logging
 
 from src.config import EmailConfig
 from src.email_listener.db import Database
-from src.email_listener.parsers import parse_email
+from src.email_listener.parsers import (
+    build_listings,
+    extract_listing_urls,
+)
+from src.email_listener.resolver import TrackingResolver
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +100,7 @@ class EmailListener:
     def _mark_as_read(self, msg_id: bytes) -> None:
         self._mail.store(msg_id, "+FLAGS", "\\Seen")
 
-    def process_once(self) -> int:
+    async def process_once(self) -> int:
         if not self._mail:
             self.connect()
 
@@ -107,47 +111,62 @@ class EmailListener:
 
         logger.info("Found %d unread email(s)", len(msg_ids))
         new_listings = 0
+        resolver = TrackingResolver()
 
-        for raw_id in msg_ids:
-            msg = self._fetch_email(raw_id)
-            if not msg:
-                continue
+        try:
+            for raw_id in msg_ids:
+                msg = self._fetch_email(raw_id)
+                if not msg:
+                    continue
 
-            message_id = self._get_message_id(msg)
+                message_id = self._get_message_id(msg)
 
-            if self.db.is_email_processed(message_id):
-                logger.debug("Already processed: %s", message_id[:40])
-                continue
+                if await self.db.is_email_processed(message_id):
+                    logger.debug("Already processed: %s", message_id[:40])
+                    continue
 
-            subject = self._decode_header(msg.get("Subject", ""))
-            date_str = msg.get("Date", "")
+                subject = self._decode_header(msg.get("Subject", ""))
+                date_str = msg.get("Date", "")
 
-            html_body = self._extract_body(msg)
-            if not html_body:
-                logger.warning("No HTML body in email: %s", subject[:60])
-                self.db.mark_email_processed(message_id)
-                continue
+                html_body = self._extract_body(msg)
+                if not html_body:
+                    logger.warning("No HTML body in email: %s", subject[:60])
+                    await self.db.mark_email_processed(message_id)
+                    continue
 
-            listings = parse_email(html_body, subject=subject, email_date=date_str)
+                candidate_urls = extract_listing_urls(html_body)
+                listing_urls = await resolver.resolve_many(candidate_urls)
 
-            saved = 0
-            for listing in listings:
-                if self.db.save_listing(listing):
-                    saved += 1
+                from bs4 import BeautifulSoup
 
-            new_listings += saved
-            self.db.mark_email_processed(message_id)
-            logger.info("Processed email '%s' -> %d new listing(s)", subject[:60], saved)
+                listings = build_listings(
+                    listing_urls,
+                    BeautifulSoup(html_body, "lxml").get_text(separator=" "),
+                    subject=subject,
+                    email_date=date_str,
+                )
 
+                saved = 0
+                for listing in listings:
+                    if await self.db.save_listing(listing):
+                        saved += 1
+
+                new_listings += saved
+                await self.db.mark_email_processed(message_id)
+                logger.info(
+                    "Processed email '%s' -> %d new listing(s)", subject[:60], saved
+                )
+        finally:
+            await resolver.close()
         return new_listings
 
-    def run_forever(self) -> None:
+    async def run_forever(self) -> None:
         logger.info("Starting email listener (poll every %ds)", self.config.poll_interval)
         self.connect()
         try:
             while True:
                 try:
-                    count = self.process_once()
+                    count = await self.process_once()
                     if count:
                         logger.info("Discovered %d new listing(s)", count)
                 except imaplib.IMAP4.abort:
@@ -156,7 +175,7 @@ class EmailListener:
                     self.connect()
                 except Exception:
                     logger.exception("Error during email poll")
-                asyncio.get_event_loop().sleep(self.config.poll_interval)
+                await asyncio.sleep(self.config.poll_interval)
         except KeyboardInterrupt:
             logger.info("Shutting down email listener")
         finally:

@@ -17,7 +17,7 @@ async def main() -> None:
 
     listener = EmailListener(config.email, db)
     try:
-        listener.run_forever()
+        await listener.run_forever()
     finally:
         await db.close()
 

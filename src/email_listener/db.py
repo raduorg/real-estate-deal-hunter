@@ -7,7 +7,7 @@ from pathlib import Path
 import aiosqlite
 
 from src.models.extraction import ListingPage, PageExtraction
-from src.models.listing import Listing, ListingStatus
+from src.models.listing import Listing, ListingStatus, VisionAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +42,14 @@ CREATE TABLE IF NOT EXISTS listing_pages (
     extraction TEXT NOT NULL DEFAULT '{}',
     fetched_at TEXT NOT NULL,
     extracted_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS vision_analyses (
+    listing_id TEXT PRIMARY KEY REFERENCES listings(id),
+    analysis TEXT NOT NULL,
+    model TEXT NOT NULL DEFAULT '',
+    images_used INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS processed_emails (
@@ -234,6 +242,44 @@ class Database:
             len(extraction.image_urls),
             extraction.confidence,
         )
+
+    async def save_vision_analysis(
+        self,
+        listing_id: str,
+        analysis: VisionAnalysis,
+        model: str,
+        images_used: int,
+    ) -> None:
+        from datetime import datetime, timezone
+
+        await self._db.execute(
+            """INSERT OR REPLACE INTO vision_analyses
+               (listing_id, analysis, model, images_used, created_at)
+               VALUES (?, ?, ?, ?, ?)""",
+            (
+                listing_id,
+                json.dumps(analysis.model_dump(mode="json")),
+                model,
+                images_used,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await self._db.commit()
+        logger.info(
+            "Saved vision analysis for %s (tier=%s)",
+            listing_id,
+            analysis.condition_tier,
+        )
+
+    async def get_vision_analysis(self, listing_id: str) -> VisionAnalysis | None:
+        async with self._db.execute(
+            "SELECT analysis FROM vision_analyses WHERE listing_id = ?",
+            (listing_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return VisionAnalysis.model_validate(json.loads(row["analysis"]))
 
     def _row_to_listing(self, row: aiosqlite.Row) -> Listing:
         return Listing(
