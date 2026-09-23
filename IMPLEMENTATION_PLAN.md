@@ -106,7 +106,7 @@ Code-first geospatial check; LLM only as fallback.
 - [x] Shapely point-in-polygon: `canonical_zone` + `zone_avg_price_sqm` (~10ms, $0)
 - [x] Zone ceiling price table (per-zone avg EUR/sqm) seeded + configurable
 - [ ] If no coordinates: gpt-4o-mini fallback to extract street name from text
-- [ ] Store zone result in `ListingState` + DB (pending LangGraph wiring)
+- [x] Store zone result in `ListingState` + DB (persisted in `pipeline_results` via Stage 8 wiring)
 
 ## Stage 4: Early-Exit Filter
 
@@ -114,7 +114,7 @@ Deterministic math gate — no vision spend for obvious dumps.
 
 - [x] Implement `is_financially_viable`: asking price/sqm > zone ceiling × 1.30 → reject
 - [x] Optional second gate: price/sqm far below floor → flag for manual review (possible scam)
-- [ ] Wire as LangGraph conditional edge `should_evaluate`
+- [x] Wire as LangGraph conditional edge `should_evaluate` (`src/orchestration/graph.py` → `evaluate_gate`)
 
 ## Stage 5: Vision Evaluation
 
@@ -139,30 +139,39 @@ Pure arithmetic.
 - [x] `is_deal = discount_percentage > deal_threshold`
 - [x] `deal_score` (configurable weighted blend of discount + condition tier)
 
-## Stage 7: Notification Dispatch
+## Stage 7: Email Digest Dispatcher
 
-Plain HTTP POST webhook.
+Batch HTML digest dispatched via Zoho SMTP to personal email upon batch completion.
 
-- [ ] Telegram bot: sendMessage + photo attachment (first image)
-- [ ] Message formatting: title, zone, price/sqm, adjusted price, discount %, deal score, link
-- [ ] WhatsApp integration later (optional)
+- [x] HTML digest generator (`src/notifier/digest_builder.py`): responsive cards, thumbnail photos, deal score badges, renovation breakdowns, clickable links
+- [x] SMTP client (`src/notifier/mailer.py`): uses existing Zoho credentials (`smtp.zoho.eu:465`) to send digest to destination personal address radu@orghidan.ro
+- [x] Wire at the end of `src/pipeline.py`: triggers once all `status='new'` listings are processed
 
 ## Stage 8: Orchestration (LangGraph)
 
-- [ ] Add `langgraph` + `shapely` + `google-genai` deps to pyproject
-- [ ] Implement `ListingState` TypedDict (shared state)
-- [ ] Implement nodes: extract → verify_zone → financial_sanity → vision → value → notify
-- [ ] Conditional edge: `should_evaluate` → vision or END
-- [ ] Database-backed persistence of final result per listing
-- [ ] Main entry: `src/pipeline.py` consuming DB `status='new'` listings, feeding the graph
+- [x] Add `langgraph` + `shapely` + `google-genai` deps to pyproject (`shapely` already present; `google-genai` retained as unused vision fallback)
+- [x] Implement `ListingState` TypedDict (shared state — `src/orchestration/state.py`)
+- [x] Implement nodes: extract → verify_zone → financial_sanity → vision → value (`src/orchestration/graph.py`)
+  - `notify` node intentionally omitted pending Stage 7 (on hold)
+- [x] Conditional edge: `should_evaluate` (`evaluate_gate`) → vision or END
+- [x] Database-backed persistence of final result per listing (`pipeline_results` table — zone, verdict, deal)
+- [x] Main entry: `src/pipeline.py` consuming DB `status='new'` listings, feeding the graph
 
 ## Stage 9: Testing, Deployment, Monitoring
 
-- [ ] Unit tests: parsers, coordinate extraction, shapely zone math, valuation formula
-- [ ] Integration test: mock listing → full graph run (mock vision)
-- [ ] End-to-end: real alert email → live vision → Telegram
-- [ ] Run on schedule (cron/systemd): poll inbox → process new listings
-- [ ] Structured logging + error alerts (Telegram on pipeline failure)
+- [x] Unit tests: parsers, coordinate extraction, shapely zone math, valuation formula (`tests/test_parsers.py`, `test_extractors.py`, `test_geocoding.py`, `test_deal_calculator.py`, `test_email_listener.py`)
+- [x] Integration test: mock listing → full graph run (mock vision) (`tests/test_pipeline.py` — mocked httpx for page/CDN/Ollama)
+- [x] End-to-end (email path): real portal alerts → Zoho IMAP → tracking resolution → listing saved → extract → zone → financial gate → live Ollama vision → valuation/deal → digest email delivered (validated 2026-09-24: 4 real alerts consumed, storia listing scored a deal, digest sent to radu@orghidan.ro)
+- [x] Run on schedule (cron/systemd): `src/daily.py` installed as a user crontab at 10:00 daily (`0 10 * * * cd <repo> && .venv/bin/python -m src.daily >> data/logs/daily.log 2>&1`)
+- [ ] Structured logging + error alerts (Telegram removed for now — decide fallback channel)
+- [ ] Scope grading/compare tooling for manual review of vision accuracy
+- [ ] User guide + troubleshooting docs
+
+## Known E2E Observations (2026-09-24)
+
+- imobiliare.ro listing fetch intermittently returns HTTP 403 (blocked); storia fetches fine
+- Local Ollama `gemma4:26b` returned empty vision fields on one listing (`tier=unknown`, reno=0) — deal still flagged via discount component; vision prompt quality needs a second look
+- Inbox backlog: ~164 unread alert emails / ~3400 tracking URLs — first daily cron run will be a long batch
 - [ ] Scope grading/compare tooling for manual review of vision accuracy
 - [ ] User guide + troubleshooting docs
 
@@ -200,5 +209,7 @@ Plain HTTP POST webhook.
 2. Meanwhile configure real portal alert emails to exercise Stage 1 live
 3. ~~Build Stage 3–4 (zone verification + early exit)~~ — implemented with `src/geocoding/`
 4. ~~Stage 5 vision (local Ollama gemma4)~~ — implemented with `src/vision_evaluator/`; smoke-tested live
-5. Wire LangGraph orchestration (Stage 8) incrementally as nodes land
-6. ~~Build Stage 6 (valuation/deal score)~~ — implemented with `src/deal_calculator/valuator.py`; ready to wire into the graph
+5. ~~Wire LangGraph orchestration (Stage 8)~~ — implemented with `src/orchestration/` + `src/pipeline.py`; consume new listings → extract → verify → gate → vision → value, persist final result
+6. ~~Build Stage 6 (valuation/deal score)~~ — implemented with `src/deal_calculator/valuator.py`; wired into the graph
+7. ~~Implement **Stage 7 (notification dispatch)** as a final graph node~~ — implemented as `src/notifier/` (HTML digest + Zoho SMTP), dispatched at the end of `src/pipeline.py`; qualifying listings marked `status='alerted'`
+8. Move to **Stage 9** (tests, deployment, monitoring)

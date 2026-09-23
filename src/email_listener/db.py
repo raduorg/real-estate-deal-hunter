@@ -6,8 +6,10 @@ from pathlib import Path
 
 import aiosqlite
 
+from src.geocoding.filter import FinancialResult, FinancialVerdict
+from src.geocoding.zones import ZoneMatch
 from src.models.extraction import ListingPage, PageExtraction
-from src.models.listing import Listing, ListingStatus, VisionAnalysis
+from src.models.listing import DealScore, Listing, ListingStatus, VisionAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,22 @@ CREATE TABLE IF NOT EXISTS vision_analyses (
     model TEXT NOT NULL DEFAULT '',
     images_used INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pipeline_results (
+    listing_id TEXT PRIMARY KEY REFERENCES listings(id),
+    zone TEXT DEFAULT '',
+    zone_avg_price_sqm REAL,
+    financial_verdict TEXT DEFAULT '',
+    financial_reason TEXT DEFAULT '',
+    passed_sanity INTEGER NOT NULL DEFAULT 0,
+    deal_score REAL,
+    is_deal INTEGER NOT NULL DEFAULT 0,
+    discount_percentage REAL,
+    adjusted_price_per_sqm REAL,
+    condition_tier TEXT DEFAULT '',
+    result TEXT NOT NULL DEFAULT '{}',
+    completed_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS processed_emails (
@@ -280,6 +298,80 @@ class Database:
         if not row:
             return None
         return VisionAnalysis.model_validate(json.loads(row["analysis"]))
+
+    async def save_pipeline_result(
+        self,
+        listing_id: str,
+        *,
+        zone_match: ZoneMatch,
+        financial: FinancialResult,
+        deal: DealScore,
+    ) -> None:
+        """Persist the Stage 8 final outcome for a listing (one row per listing).
+
+        The row captures the zone result, the early-exit verdict and the deal
+        score, so a run can be audited without re-invoking any service.
+        """
+        from datetime import datetime, timezone
+
+        passed_sanity = financial.verdict != FinancialVerdict.TOO_EXPENSIVE
+        result = {
+            "passed_sanity": passed_sanity,
+            "zone_match": {
+                "zone": zone_match.zone,
+                "avg_price_sqm": zone_match.avg_price_sqm,
+                "matched": zone_match.matched,
+                "method": zone_match.method,
+            },
+            "financial": {
+                "verdict": financial.verdict.value,
+                "price_per_sqm": financial.price_per_sqm,
+                "zone_avg_price_sqm": financial.zone_avg_price_sqm,
+                "reason": financial.reason,
+            },
+            "deal": deal.model_dump(mode="json"),
+        }
+        await self._db.execute(
+            """INSERT OR REPLACE INTO pipeline_results
+               (listing_id, zone, zone_avg_price_sqm, financial_verdict,
+                financial_reason, passed_sanity, deal_score, is_deal,
+                discount_percentage, adjusted_price_per_sqm, condition_tier,
+                result, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                listing_id,
+                zone_match.zone,
+                zone_match.avg_price_sqm,
+                financial.verdict.value,
+                financial.reason,
+                int(passed_sanity),
+                deal.deal_score,
+                int(deal.is_deal),
+                deal.discount_percentage,
+                deal.adjusted_price_per_sqm,
+                deal.condition_tier,
+                json.dumps(result),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await self._db.commit()
+        logger.info(
+            "Saved pipeline result for %s (zone=%r verdict=%s is_deal=%s)",
+            listing_id,
+            zone_match.zone,
+            financial.verdict.value,
+            deal.is_deal,
+        )
+
+    async def get_pipeline_result(self, listing_id: str) -> dict | None:
+        async with self._db.execute(
+            "SELECT result FROM pipeline_results WHERE listing_id = ?",
+            (listing_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            return None
+        return json.loads(row["result"])
 
     def _row_to_listing(self, row: aiosqlite.Row) -> Listing:
         return Listing(

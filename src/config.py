@@ -62,6 +62,17 @@ class ZoneConfig:
 
 
 @dataclass(frozen=True)
+class NotifierConfig:
+    """Stage 7 email digest dispatch via Zoho SMTP (SSL)."""
+
+    smtp_host: str = "smtp.zoho.eu"
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_password: str = ""
+    recipient: str = "radu@orghidan.ro"
+
+
+@dataclass(frozen=True)
 class DealConfig:
     """Stage 6 valuation & deal scoring thresholds (pure arithmetic)."""
 
@@ -79,6 +90,7 @@ class Config:
     extractor: ExtractorConfig = field(default_factory=ExtractorConfig)
     zones: ZoneConfig = field(default_factory=ZoneConfig)
     deals: DealConfig = field(default_factory=DealConfig)
+    notifier: NotifierConfig = field(default_factory=NotifierConfig)
     database_path: Path = field(default_factory=lambda: Path("data/listings.db"))
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -141,6 +153,13 @@ def load_config(env_path: str | Path | None = None) -> Config:
             max_discount_percent=float(os.getenv("DEAL_MAX_DISCOUNT_PERCENT", "40")),
             discount_weight=float(os.getenv("DEAL_DISCOUNT_WEIGHT", "0.80")),
             condition_weight=float(os.getenv("DEAL_CONDITION_WEIGHT", "0.20")),
+        ),
+        notifier=NotifierConfig(
+            smtp_host=os.getenv("SMTP_HOST", "smtp.zoho.eu"),
+            smtp_port=int(os.getenv("SMTP_PORT", "465")),
+            smtp_user=os.getenv("EMAIL_USER", ""),
+            smtp_password=os.getenv("EMAIL_PASSWORD", ""),
+            recipient=os.getenv("DIGEST_RECIPIENT_EMAIL", "radu@orghidan.ro"),
         ),
         database_path=Path(os.getenv("DATABASE_PATH", "data/listings.db")),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
