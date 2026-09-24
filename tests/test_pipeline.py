@@ -60,6 +60,27 @@ NO_PRICE_HTML = """<!DOCTYPE html><html><head>
   <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
 </head><body></body></html>"""
 
+SEISMIC_HTML = """<!DOCTYPE html><html><head>
+  <meta property="og:title" content="Apartament 3 camere, 70 mp, 95.000 Euro - Bucuresti, Sector 3" />
+  <meta property="og:description" content="Apartament, 70 mp, 95.000 Euro, etaj 1, bloc cu risc seismic 1" />
+  <meta property="og:image" content="https://cdn.test/1.png" />
+  <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
+</head><body></body></html>"""
+
+CHEAP_HTML = """<!DOCTYPE html><html><head>
+  <meta property="og:title" content="Apartament 2 camere, 120 mp, 8.500 Euro - Bucuresti, Sector 3" />
+  <meta property="og:description" content="Apartament de vanzare, 2 camere, 120 mp, 8.500 Euro, etaj 4" />
+  <meta property="og:image" content="https://cdn.test/1.png" />
+  <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
+</head><body></body></html>"""
+
+BASEMENT_HTML = """<!DOCTYPE html><html><head>
+  <meta property="og:title" content="Apartament 2 camere, demisol, 55 mp, 45.000 Euro - Bucuresti, Sector 3" />
+  <meta property="og:description" content="Apartament la demisol, 2 camere, 55 mp, 45.000 Euro" />
+  <meta property="og:image" content="https://cdn.test/1.png" />
+  <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
+</head><body></body></html>"""
+
 
 def make_config(tmp_path: Path) -> Config:
     return Config(
@@ -218,6 +239,8 @@ class TestPipelineGraph:
             assert deal.is_deal
             assert deal.condition_tier == "habitable_dated"
             assert deal.discount_percentage == pytest.approx(19.25, abs=0.05)
+            assert final["seismic"] == 3  # no year/storeys/class signals -> neutral
+            assert final["listing"].seismic_risk == 3
 
             analyzed = await builder.db.get_listings_by_status(ListingStatus.ANALYZED)
             assert [r.id for r in analyzed] == [listing.id]
@@ -275,8 +298,84 @@ class TestPipelineGraph:
         finally:
             await builder.close()
 
+    async def test_seismic_risk_5_listing_never_reaches_vision(self, tmp_path: Path) -> None:
+        builder, config, listing = await build_runner(tmp_path, SEISMIC_HTML)
 
-class TestDbPersistence:
+        try:
+            # Any vision/zone/financial call would be a routing lapse.
+            builder.vision_evaluator = VisionEvaluator(
+                config, builder.db, transport=httpx.MockTransport(
+                    lambda request: pytest.fail(f"unexpected call: {request.url}")
+                )
+            )
+
+            graph = builder.build_graph()
+            final = await graph.ainvoke({"listing": listing})
+
+            assert final["seismic"] == 5
+            assert final["listing"].seismic_risk == 5
+            assert "zone_match" not in final
+            assert "financial" not in final
+            assert "vision" not in final
+            assert "deal" not in final
+
+            skipped = await builder.db.get_listings_by_status(ListingStatus.SKIPPED)
+            assert [r.id for r in skipped] == [listing.id]
+            assert await builder.db.get_pipeline_result(listing.id) is None
+        finally:
+            await builder.close()
+
+    async def test_cheap_rental_listing_never_reaches_vision(self, tmp_path: Path) -> None:
+        builder, config, listing = await build_runner(tmp_path, CHEAP_HTML)
+
+        try:
+            builder.vision_evaluator = VisionEvaluator(
+                config, builder.db, transport=httpx.MockTransport(
+                    lambda request: pytest.fail(f"unexpected call: {request.url}")
+                )
+            )
+
+            graph = builder.build_graph()
+            final = await graph.ainvoke({"listing": listing})
+
+            assert final["filter"]
+            assert "zone_match" not in final
+            assert "financial" not in final
+            assert "seismic" not in final
+            assert "vision" not in final
+            assert "deal" not in final
+
+            skipped = await builder.db.get_listings_by_status(ListingStatus.SKIPPED)
+            assert [r.id for r in skipped] == [listing.id]
+            assert await builder.db.get_pipeline_result(listing.id) is None
+        finally:
+            await builder.close()
+
+    async def test_basement_listing_never_reaches_vision(self, tmp_path: Path) -> None:
+        builder, config, listing = await build_runner(tmp_path, BASEMENT_HTML)
+
+        try:
+            builder.vision_evaluator = VisionEvaluator(
+                config, builder.db, transport=httpx.MockTransport(
+                    lambda request: pytest.fail(f"unexpected call: {request.url}")
+                )
+            )
+
+            graph = builder.build_graph()
+            final = await graph.ainvoke({"listing": listing})
+
+            assert final["filter"]
+            assert "demisol" in final["filter"]
+            assert "zone_match" not in final
+            assert "seismic" not in final
+            assert "vision" not in final
+            assert "deal" not in final
+
+            skipped = await builder.db.get_listings_by_status(ListingStatus.SKIPPED)
+            assert [r.id for r in skipped] == [listing.id]
+            assert await builder.db.get_pipeline_result(listing.id) is None
+        finally:
+            await builder.close()
     async def test_save_and_get_pipeline_result(self, tmp_path: Path) -> None:
         db = Database(tmp_path / "p.db")
 

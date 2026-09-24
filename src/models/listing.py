@@ -38,6 +38,10 @@ class Listing(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     image_urls: list[str] = Field(default_factory=list)
+    construction_year: int | None = None
+    storeys: int | None = None
+    seismic_risk_class: int | None = None
+    seismic_risk: int | None = None
     status: ListingStatus = Field(default=ListingStatus.NEW)
     discovered_at: datetime = Field(default_factory=datetime.utcnow)
     email_subject: str = ""
@@ -64,3 +68,4 @@ class DealScore(BaseModel):
     total_renovation_cost: int = 0
     deal_score: float = 0.0
     condition_tier: str = "unknown"
+    seismic_risk: int | None = None

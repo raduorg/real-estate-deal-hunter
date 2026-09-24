@@ -1,23 +1,25 @@
 """Stage 6: Valuation & deal scoring — pure arithmetic, no I/O, no LLM.
 
 Takes the already-extracted asking price, the vision-estimated renovation
-cost and the zone market average, then produces:
+cost, the zone market average and the seismic risk score, then produces:
 
     adjusted_price_sqm     = (price + total_renovation) / sqm
     discount_percentage    = (market_avg - adjusted) / market_avg * 100
     is_deal                = discount_percentage > deal_threshold
-    deal_score             = weighted blend of discount + condition tier
+    deal_score             = weighted blend of discount + condition + seismic
 """
 
 from __future__ import annotations
 
 from src.models.listing import DealScore, Listing, VisionAnalysis
+from src.seismic.risk import seismic_component
 
 # Default deterministic thresholds (Stage 6). Config values may override.
 DEAL_THRESHOLD_PERCENT = 10.0  # discount above this makes the listing a deal
 MAX_DISCOUNT_PERCENT = 40.0  # discounts beyond this saturate the deal score
-DISCOUNT_WEIGHT = 0.80  # market-relative value of the deal
-CONDITION_WEIGHT = 0.20  # finish quality of the deal
+DISCOUNT_WEIGHT = 0.60  # market-relative value of the deal
+CONDITION_WEIGHT = 0.15  # finish quality of the deal
+SEISMIC_WEIGHT = 0.25  # seismic safety of the building
 
 # Higher tier = better condition; mirrors the vision schema in prompts.py.
 CONDITION_TIER_SCORES: dict[str, float] = {
@@ -69,23 +71,32 @@ def discount_percent(market_avg_sqm: float | None, adjusted_sqm: float | None) -
 def deal_score(
     discount_percent: float | None,
     condition_tier: str,
+    seismic_risk: int | None,
     max_discount_percent: float = MAX_DISCOUNT_PERCENT,
     discount_weight: float = DISCOUNT_WEIGHT,
     condition_weight: float = CONDITION_WEIGHT,
+    seismic_weight: float = SEISMIC_WEIGHT,
 ) -> float:
-    """Weighted 0..100 blend of market discount and finish quality.
+    """Weighted 0..100 blend of market discount, finish quality and seismic safety.
 
-    Without a market reference the score reflects condition alone (the
-    discount component is dropped rather than counted as zero).
+    Without a market reference the discount component is dropped (it is not
+    counted as zero); condition and seismic still contribute. An unknown
+    seismic risk neutralizes at 0.5, so missing signals neither help nor hurt.
     """
     cond = condition_component(condition_tier)
+    seam = seismic_component(seismic_risk)
     if discount_percent is None:
-        combined = condition_weight
+        combined = condition_weight + seismic_weight
         disc = 0.0
     else:
-        combined = discount_weight + condition_weight
+        combined = discount_weight + condition_weight + seismic_weight
         disc = discount_component(discount_percent, max_discount_percent)
-    return round(100.0 * (discount_weight * disc + condition_weight * cond) / combined, 1)
+    return round(
+        100.0
+        * (discount_weight * disc + condition_weight * cond + seismic_weight * seam)
+        / combined,
+        1,
+    )
 
 
 def evaluate_deal(
@@ -96,6 +107,7 @@ def evaluate_deal(
     max_discount_percent: float = MAX_DISCOUNT_PERCENT,
     discount_weight: float = DISCOUNT_WEIGHT,
     condition_weight: float = CONDITION_WEIGHT,
+    seismic_weight: float = SEISMIC_WEIGHT,
 ) -> DealScore:
     """Full Stage 6 pass: fill DealScore via pure arithmetic.
 
@@ -123,17 +135,21 @@ def evaluate_deal(
         deal_score=deal_score(
             disc,
             analysis.condition_tier,
+            listing.seismic_risk,
             max_discount_percent,
             discount_weight,
             condition_weight,
+            seismic_weight,
         ),
         condition_tier=analysis.condition_tier,
+        seismic_risk=listing.seismic_risk,
     )
 
 
 __all__ = [
     "DISCOUNT_WEIGHT",
     "CONDITION_WEIGHT",
+    "SEISMIC_WEIGHT",
     "CONDITION_TIER_SCORES",
     "DEAL_THRESHOLD_PERCENT",
     "MAX_DISCOUNT_PERCENT",

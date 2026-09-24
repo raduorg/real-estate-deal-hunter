@@ -74,12 +74,18 @@ class NotifierConfig:
 
 @dataclass(frozen=True)
 class DealConfig:
-    """Stage 6 valuation & deal scoring thresholds (pure arithmetic)."""
+    """Stage 6 valuation & deal scoring thresholds (pure arithmetic).
+
+    discount_weight + condition_weight + seismic_weight should sum to 1.0;
+    seismic carries ~25% by default per the Bucharest earthquake rationale.
+    """
 
     deal_threshold_percent: float = 10.0
     max_discount_percent: float = 40.0
-    discount_weight: float = 0.80
-    condition_weight: float = 0.20
+    discount_weight: float = 0.60
+    condition_weight: float = 0.15
+    seismic_weight: float = 0.25
+    min_price_eur: int = 10_000
 
 
 @dataclass(frozen=True)
@@ -151,8 +157,10 @@ def load_config(env_path: str | Path | None = None) -> Config:
         deals=DealConfig(
             deal_threshold_percent=float(os.getenv("DEAL_THRESHOLD_PERCENT", "10")),
             max_discount_percent=float(os.getenv("DEAL_MAX_DISCOUNT_PERCENT", "40")),
-            discount_weight=float(os.getenv("DEAL_DISCOUNT_WEIGHT", "0.80")),
-            condition_weight=float(os.getenv("DEAL_CONDITION_WEIGHT", "0.20")),
+            discount_weight=float(os.getenv("DEAL_DISCOUNT_WEIGHT", "0.60")),
+            condition_weight=float(os.getenv("DEAL_CONDITION_WEIGHT", "0.15")),
+            seismic_weight=float(os.getenv("DEAL_SEISMIC_WEIGHT", "0.25")),
+            min_price_eur=int(os.getenv("DEAL_MIN_PRICE_EUR", "10000")),
         ),
         notifier=NotifierConfig(
             smtp_host=os.getenv("SMTP_HOST", "smtp.zoho.eu"),

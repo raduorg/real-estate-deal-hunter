@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS listings (
     latitude REAL,
     longitude REAL,
     image_urls TEXT DEFAULT '[]',
+    construction_year INTEGER,
+    storeys INTEGER,
+    seismic_risk_class INTEGER,
+    seismic_risk INTEGER,
     status TEXT DEFAULT 'new',
     discovered_at TEXT NOT NULL,
     email_subject TEXT DEFAULT '',
@@ -84,6 +88,10 @@ _LISTING_COLUMNS = {
     "description": "TEXT DEFAULT ''",
     "latitude": "REAL",
     "longitude": "REAL",
+    "construction_year": "INTEGER",
+    "storeys": "INTEGER",
+    "seismic_risk_class": "INTEGER",
+    "seismic_risk": "INTEGER",
 }
 
 
@@ -144,9 +152,10 @@ class Database:
         await self._db.execute(
             """INSERT INTO listings
                (id, url, source, title, description, price_eur, sqm, rooms, city,
-                neighborhood, address, latitude, longitude, image_urls, status,
-                discovered_at, email_subject, email_date)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                neighborhood, address, latitude, longitude, image_urls,
+                construction_year, storeys, seismic_risk,
+                status, discovered_at, email_subject, email_date)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 listing.id,
                 listing.url,
@@ -162,6 +171,9 @@ class Database:
                 listing.latitude,
                 listing.longitude,
                 json.dumps(listing.image_urls),
+                listing.construction_year,
+                listing.storeys,
+                listing.seismic_risk,
                 listing.status.value,
                 listing.discovered_at.isoformat(),
                 listing.email_subject,
@@ -179,9 +191,26 @@ class Database:
             rows = await cur.fetchall()
             return [self._row_to_listing(row) for row in rows]
 
+    async def get_deal_listings(self) -> list[Listing]:
+        """Listings flagged as qualifying deals (pipeline_results.is_deal = 1)."""
+        async with self._db.execute(
+            """SELECT l.*
+               FROM listings l
+               JOIN pipeline_results pr ON pr.listing_id = l.id
+               WHERE pr.is_deal = 1"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_listing(row) for row in rows]
+
     async def update_listing_status(self, listing_id: str, status: ListingStatus) -> None:
         await self._db.execute(
             "UPDATE listings SET status = ? WHERE id = ?", (status.value, listing_id)
+        )
+        await self._db.commit()
+
+    async def update_seismic_risk(self, listing_id: str, risk: int) -> None:
+        await self._db.execute(
+            "UPDATE listings SET seismic_risk = ? WHERE id = ?", (risk, listing_id)
         )
         await self._db.commit()
 
@@ -225,7 +254,8 @@ class Database:
         await self._db.execute(
             """UPDATE listings SET title = ?, description = ?, price_eur = ?, sqm = ?,
                rooms = ?, city = ?, neighborhood = ?, address = ?,
-               latitude = ?, longitude = ?, image_urls = ?, status = ?
+               latitude = ?, longitude = ?, image_urls = ?,
+               construction_year = ?, storeys = ?, seismic_risk_class = ?, status = ?
                WHERE id = ?""",
             (
                 extraction.title,
@@ -239,6 +269,9 @@ class Database:
                 extraction.latitude,
                 extraction.longitude,
                 json.dumps(extraction.image_urls),
+                extraction.construction_year,
+                extraction.storeys,
+                extraction.seismic_risk_class,
                 new_status.value,
                 listing_id,
             ),
@@ -373,6 +406,21 @@ class Database:
             return None
         return json.loads(row["result"])
 
+    async def unflag_deal(self, listing_id: str, reason: str) -> None:
+        """Demote a previously-flagged deal after a rule change and record why."""
+        from datetime import datetime, timezone
+
+        result = await self.get_pipeline_result(listing_id) or {}
+        result.setdefault("deal", {})["is_deal"] = False
+        result["filtered_reason"] = reason
+        result["filtered_at"] = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            "UPDATE pipeline_results SET is_deal = 0, result = ? WHERE listing_id = ?",
+            (json.dumps(result), listing_id),
+        )
+        await self._db.commit()
+        logger.info("Unflagged deal %s: %s", listing_id, reason)
+
     def _row_to_listing(self, row: aiosqlite.Row) -> Listing:
         return Listing(
             id=row["id"],
@@ -389,6 +437,10 @@ class Database:
             latitude=row["latitude"],
             longitude=row["longitude"],
             image_urls=json.loads(row["image_urls"]),
+            construction_year=row["construction_year"],
+            storeys=row["storeys"],
+            seismic_risk_class=row["seismic_risk_class"],
+            seismic_risk=row["seismic_risk"],
             status=row["status"],
             discovered_at=row["discovered_at"],
             email_subject=row["email_subject"],

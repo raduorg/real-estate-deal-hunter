@@ -22,6 +22,7 @@ _DEAL_GOOD_THRESHOLD = 70.0  # DealScore is 0..100; >= 70 renders a green badge
 # Badge / accent colors used across the card markup.
 _BADGE_GOOD = "#16a34a"
 _BADGE_MODERATE = "#ca8a04"
+_BADGE_RISK = "#b91c1c"
 _LINK_BLUE = "#2563eb"
 
 
@@ -54,6 +55,22 @@ class DigestDeal:
         if self.zone and self.zone.avg_price_sqm:
             return self.zone.avg_price_sqm
         return self.deal.market_average_per_sqm
+
+    @property
+    def seismic_label(self) -> str:
+        risk = self.deal.seismic_risk
+        return f"{risk}/5" if risk else "n/a"
+
+    @property
+    def seismic_color(self) -> str:
+        risk = self.deal.seismic_risk
+        if risk is None:
+            return "#6b7280"
+        if risk <= 2:
+            return _BADGE_GOOD
+        if risk == 3:
+            return _BADGE_MODERATE
+        return _BADGE_RISK
 
     @property
     def image_url(self) -> str:
@@ -98,6 +115,10 @@ def _card_html(idx: int, deal: DigestDeal) -> str:
                             <tr>
                                 <td style="padding-right: 12px;"><strong>Condition:</strong></td>
                                 <td>{deal.condition_label}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding-right: 12px;"><strong>Seismic Risk:</strong></td>
+                                <td><strong style="color: {deal.seismic_color};">{deal.seismic_label}</strong></td>
                             </tr>
                             <tr>
                                 <td style="padding-right: 12px;"><strong>Est. Renovation:</strong></td>

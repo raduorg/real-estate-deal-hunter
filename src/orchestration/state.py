@@ -18,13 +18,16 @@ from src.models.listing import Listing, VisionAnalysis
 
 
 class ListingState(TypedDict, total=False):
-    """One listing travelling through extract -> verify_zone -> financial ->
-    vision -> value. `total=False` keeps every channel optional so a node can
-    run as soon as its inputs exist and fail downstream cheaply otherwise.
+    """One listing travelling through extract -> filter -> seismic ->
+    verify_zone -> financial -> vision -> value. `total=False` keeps every
+    channel optional so a node can run as soon as its inputs exist and fail
+    downstream cheaply otherwise.
     """
 
     listing: Listing
     extraction: PageExtraction
+    filter: str | None
+    seismic: int | None
     zone_match: ZoneMatch
     financial: FinancialResult
     vision: VisionAnalysis

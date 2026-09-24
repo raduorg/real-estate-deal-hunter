@@ -18,12 +18,14 @@ from src.deal_calculator.valuator import evaluate_deal
 from src.email_listener.db import Database
 from src.extractor.extractor import Extractor
 from src.extractor.fetcher import PageFetcher
+from src.filters import should_exclude
 from src.geocoding.filter import FinancialResult, FinancialVerdict, is_financially_viable
 from src.geocoding.prices import load_zone_prices
 from src.geocoding.zones import ZoneIndex, ZoneMatch, ZoneResolver
 from src.models.extraction import PageExtraction
 from src.models.listing import Listing, ListingStatus, VisionAnalysis
 from src.orchestration.state import ListingState
+from src.seismic.risk import is_excluded, seismic_risk_score
 from src.vision_evaluator.evaluator import VisionError, VisionEvaluator
 
 logger = logging.getLogger(__name__)
@@ -41,6 +43,9 @@ _EXTRACTION_FIELDS = (
     "latitude",
     "longitude",
     "image_urls",
+    "construction_year",
+    "storeys",
+    "seismic_risk_class",
 )
 
 
@@ -136,6 +141,65 @@ class PipelineBuilder:
         )
         return {"extraction": extraction, "listing": merge_extraction(listing, extraction)}
 
+    async def filter(self, state: ListingState) -> dict[str, object]:
+        """Stage 3b: early-exit on sub-floor price or demisol/subsol level.
+
+        Cheap text/math rules run right after extraction, so obvious junk
+        (mislisted rentals, basements) never reaches zone/financial/vision.
+        """
+        listing = state["listing"]
+        result = should_exclude(
+            listing,
+            min_price_eur=self.config.deals.min_price_eur,
+        )
+        if result.rejected:
+            logger.info("Listing %s filtered out: %s", listing.id, result.reason)
+            await self.db.update_listing_status(listing.id, ListingStatus.SKIPPED)
+            return {"filter": result.reason}
+        logger.debug("Listing %s passed pre-filters", listing.id)
+        return {"filter": None}
+
+    def filter_gate(self, state: ListingState) -> str:
+        return "end" if state.get("filter") else "seismic"
+
+    async def seismic(self, state: ListingState) -> dict[str, object]:
+        """Stage 3a: score seismic risk right after extraction — pure text math.
+
+        Risk-5 buildings are excluded here, before any zone/financial/vision
+        spend, mirroring the Stage 4 early-exit philosophy.
+        """
+        listing = state["listing"]
+        risk = seismic_risk_score(
+            listing.seismic_risk_class,
+            listing.construction_year,
+            listing.storeys,
+        )
+        updated = listing.model_copy(update={"seismic_risk": risk})
+        await self.db.update_seismic_risk(listing.id, risk)
+        if is_excluded(risk):
+            logger.info(
+                "Listing %s excluded: seismic_risk=%s (class=%s year=%s storeys=%s)",
+                listing.id,
+                risk,
+                listing.seismic_risk_class,
+                listing.construction_year,
+                listing.storeys,
+            )
+            await self.db.update_listing_status(listing.id, ListingStatus.SKIPPED)
+            return {"listing": updated, "seismic": risk}
+        logger.info(
+            "Listing %s seismic risk: %s (class=%s year=%s storeys=%s)",
+            listing.id,
+            risk,
+            listing.seismic_risk_class,
+            listing.construction_year,
+            listing.storeys,
+        )
+        return {"listing": updated, "seismic": risk}
+
+    def seismic_gate(self, state: ListingState) -> str:
+        return "end" if is_excluded(state.get("seismic")) else "verify_zone"
+
     async def verify_zone(self, state: ListingState) -> dict[str, object]:
         listing = state["listing"]
         match = self.resolver.resolve(listing)
@@ -217,6 +281,7 @@ class PipelineBuilder:
             max_discount_percent=self.config.deals.max_discount_percent,
             discount_weight=self.config.deals.discount_weight,
             condition_weight=self.config.deals.condition_weight,
+            seismic_weight=self.config.deals.seismic_weight,
         )
         if financial is None:
             financial = FinancialResult(
@@ -248,12 +313,20 @@ class PipelineBuilder:
     def build_graph(self) -> Any:
         graph = StateGraph(ListingState)
         graph.add_node("extract", self.extract)
+        graph.add_node("filter", self.filter)
+        graph.add_node("seismic", self.seismic)
         graph.add_node("verify_zone", self.verify_zone)
         graph.add_node("financial", self.financial)
         graph.add_node("vision", self.vision)
         graph.add_node("value", self.value)
         graph.add_edge(START, "extract")
-        graph.add_edge("extract", "verify_zone")
+        graph.add_edge("extract", "filter")
+        graph.add_conditional_edges(
+            "filter", self.filter_gate, {"seismic": "seismic", "end": END}
+        )
+        graph.add_conditional_edges(
+            "seismic", self.seismic_gate, {"verify_zone": "verify_zone", "end": END}
+        )
         graph.add_edge("verify_zone", "financial")
         graph.add_conditional_edges(
             "financial", self.should_evaluate, {"vision": "vision", "end": END}

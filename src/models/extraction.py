@@ -35,5 +35,8 @@ class PageExtraction(BaseModel):
     latitude: float | None = None
     longitude: float | None = None
     image_urls: list[str] = Field(default_factory=list)
+    construction_year: int | None = None
+    storeys: int | None = None
+    seismic_risk_class: int | None = None
     parse_methods: list[str] = Field(default_factory=list)
     confidence: float = 0.0

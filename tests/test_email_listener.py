@@ -23,6 +23,30 @@ class TestDecodeImobiliareTracking:
         )
         assert decode_imobiliare_tracking(url) is None
 
+    def test_unwraps_auto_login_redirect(self):
+        import base64
+
+        target = (
+            "https://www.imobiliare.ro/auto-login/0051b17d6ab647b97578b0453d4f9d"
+            "?urlHash=b70fa0dd001eff&signature=1b366081e2d503"
+            "&redirectUrl=https%3A%2F%2Fwww.imobiliare.ro%2Foferta%2Fapartament-2-camere-276021449"
+            "%3Futm_content%3Dlisting-card%26utm_medium%3Demail"
+        )
+        b64 = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        url = f"https://link.imobiliare.ro/click/6ab4f6393ba5953e59062b2d/{b64}/6aa7e6338d97539f3e091485Be44fb4c5"
+        assert decode_imobiliare_tracking(url) == (
+            "https://www.imobiliare.ro/oferta/apartament-2-camere-276021449"
+            "?utm_content=listing-card&utm_medium=email"
+        )
+
+    def test_auto_login_without_redirect_is_rejected(self):
+        import base64
+
+        target = "https://www.imobiliare.ro/auto-login/0051b17d6ab647b97578b0453d4f9d?urlHash=abc"
+        b64 = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+        url = f"https://link.imobiliare.ro/click/6ab4f6393ba5953e59062b2d/{b64}/6aa7e6338d97539f3e091485Be44fb4c5"
+        assert decode_imobiliare_tracking(url) is None
+
     def test_rejects_non_tracking_domain(self):
         assert decode_imobiliare_tracking("https://www.imobiliare.ro/oferta/x-123") is None
 

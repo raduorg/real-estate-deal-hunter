@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Iterator
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -103,6 +104,67 @@ _SKIPPED_SCRIPT_TYPES = (
     "application/ld+json",
 )
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# --------------------------------------------------------------------------- #
+# Seismic signal extraction (construction year, building height, risk class)
+# --------------------------------------------------------------------------- #
+
+_CURRENT_YEAR = datetime.now().year
+
+_YEAR_KEYS = {
+    "yearbuilt",
+    "buildyear",
+    "constructionyear",
+    "anconstructie",
+    "anconstruire",
+    "anulconstruirii",
+    "builtin",
+}
+_STOREYS_KEYS = {
+    "storeys",
+    "storey",
+    "nooffloors",
+    "numaretaje",
+    "numaeretaje",
+    "numarletaje",
+    "buildingfloors",
+    "buildingfloor",
+    "buildinglevels",
+    "levels",
+}
+_SEISMIC_KEYS = {"seismicrisk", "riscseismic", "seismicclass"}
+
+# "an constructie 1968", "anul de construire 1972", "construit in 1930",
+# "built in 2008" -> captured directly as a 4-digit year.
+_YEAR_TEXT_RE = re.compile(
+    r"(?:an(?:ul)?(?:\s+de)?\s+(?:construc(?:ti[ae]|tie)|construire)|"
+    r"construit(?:ă|a|e)?(?:\s+in)?|built\s+in)"
+    r"\s*[:\-]?\s*(\d{4})\b",
+    re.IGNORECASE,
+)
+# "anul 1955", "an 1968", "bloc din 1963" (generic year references).
+_YEAR_FLAT_RE = re.compile(r"\b(?:anul|an|din)\s+(\d{4})\b", re.IGNORECASE)
+
+# "P+3", "P+2+M" (regim de inaltime) -> storeys = 1 + floors.
+_STOREYS_REGIME_RE = re.compile(r"\bP\s*\+\s*(\d{1,2})(?:\s*\+\s*M\b)?", re.IGNORECASE)
+# "5 etaje", "4 niveluri", "5 levels", "6 floors" -> building-wide count.
+_STOREYS_PLURAL_RE = re.compile(r"\b(\d{1,2})\s*(?:etaje|niveluri|levels|floors)\b", re.IGNORECASE)
+# "bloc cu 5 etaje", "bloc de 10 etaje" -> same as above, unit must be plural.
+_STOREYS_BLOC_RE = re.compile(
+    r"\bbloc(?:\s+(?:cu|de|pe))?\s+(\d{1,2})\s+(?:etaje|niveluri|levels|floors)\b", re.IGNORECASE
+)
+
+_ROMAN = {"I": 1, "II": 2, "III": 3, "IV": 4}
+
+# "risc seismic 1", "risc seismic R2", "clasa de risc seismic II",
+# "seismic risk class 3". Optional RS/R prefix before the class token.
+_SEISMIC_CLASS_RE = re.compile(
+    r"(?:(?:risc(?:ul|ul de risc)?|clasa(?: de risc)?|grad(?: de risc)?|class)\s+seismic\b|"
+    r"seismic\s+risk\b)"
+    r"\s*(?:de\s+)?(?:clasa|grad|class|clasa de risc)?\s*"
+    r"(?:(?:RS|R)\s*)?([1-4]|[IVX]{1,3})\b",
+    re.IGNORECASE,
+)
 
 
 def source_from_url(url: str) -> ListingSource:
@@ -306,6 +368,91 @@ def _looks_like_photo(url: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Pass 3b: seismic signals (year, storeys, risk class) from JSON + raw text
+# --------------------------------------------------------------------------- #
+
+
+def _numeric_from_json(
+    nodes: list[Any], keys: set[str], low: int, high: int
+) -> int | None:
+    """First plausible int found under any of `keys` anywhere in nested JSON."""
+    for d in _iter_dicts(nodes):
+        for key, value in d.items():
+            if key.lower() not in keys:
+                continue
+            if _is_number(value):
+                candidate = int(value)
+                if low <= candidate <= high:
+                    return candidate
+            elif isinstance(value, str):
+                m = re.search(r"\d{1,4}", value.replace(" ", ""))
+                if m:
+                    candidate = int(m.group())
+                    if low <= candidate <= high:
+                        return candidate
+    return None
+
+
+def _seismic_class_value(token: str) -> int | None:
+    """Turn a class token ('1', 'R2', 'II') into 1..4, ignoring casing."""
+    t = token.strip().upper()
+    t = re.sub(r"^(?:RS|R)\s*", "", t)
+    if t.isdigit():
+        n = int(t)
+        return n if 1 <= n <= 4 else None
+    return _ROMAN.get(t)
+
+
+def _seismic_class_from_json(nodes: list[Any]) -> int | None:
+    for d in _iter_dicts(nodes):
+        for key, value in d.items():
+            if key.lower() not in _SEISMIC_KEYS:
+                continue
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                m = _seismic_class_value(str(int(value)))
+                if m:
+                    return m
+            elif isinstance(value, str):
+                m = _seismic_class_value(value)
+                if m:
+                    return m
+    return None
+
+
+def _seismic_class_from_text(text: str) -> int | None:
+    for m in _SEISMIC_CLASS_RE.finditer(text):
+        value = _seismic_class_value(m.group(1))
+        if value:
+            return value
+    return None
+
+
+def _year_from_text(text: str) -> int | None:
+    for pattern in (_YEAR_TEXT_RE, _YEAR_FLAT_RE):
+        for m in pattern.finditer(text):
+            year = int(m.group(1))
+            if 1800 <= year <= _CURRENT_YEAR:
+                return year
+    return None
+
+
+def _storeys_from_text(text: str) -> int | None:
+    m = _STOREYS_REGIME_RE.search(text)
+    if m:
+        storeys = int(m.group(1)) + 1  # parter + N floors above
+        return storeys if 1 <= storeys <= 60 else None
+    m = _STOREYS_BLOC_RE.search(text)
+    if m:
+        storeys = int(m.group(1))
+        return storeys if 1 <= storeys <= 60 else None
+    m = _STOREYS_PLURAL_RE.search(text)
+    if m:
+        storeys = int(m.group(1))
+        return storeys if 1 <= storeys <= 60 else None
+    return None
+
+
+# --------------------------------------------------------------------------- #
 # Pass 4: regex on raw text
 # --------------------------------------------------------------------------- #
 
@@ -475,6 +622,39 @@ def extract_from_html(
         if coords is not None:
             extraction.latitude, extraction.longitude = coords
             extraction.parse_methods.append("coords_regex")
+
+    # Seismic signals ----------------------------------------------------- #
+    # Structured JSON is the most precise source; fall back to free text.
+    # The body `text` misses <meta> content (portals keep the description in
+    # og:description), so the meta text and derived description are scanned too.
+    signal_text = " ".join(
+        filter(None, (text, meta_text, extraction.description, extraction.title))
+    )
+    construction_year = _numeric_from_json(all_nodes, _YEAR_KEYS, 1800, _CURRENT_YEAR)
+    year_source = "year_json"
+    if construction_year is None:
+        construction_year = _year_from_text(signal_text)
+        year_source = "year_text"
+    storeys = _numeric_from_json(all_nodes, _STOREYS_KEYS, 1, 60)
+    storeys_source = "storeys_json"
+    if storeys is None:
+        storeys = _storeys_from_text(signal_text)
+        storeys_source = "storeys_text"
+    seismic_class = _seismic_class_from_json(all_nodes)
+    seismic_source = "seismic_json"
+    if seismic_class is None:
+        seismic_class = _seismic_class_from_text(signal_text)
+        seismic_source = "seismic_text"
+
+    extraction.construction_year = construction_year
+    extraction.storeys = storeys
+    extraction.seismic_risk_class = seismic_class
+    if construction_year is not None:
+        extraction.parse_methods.append(year_source)
+    if storeys is not None:
+        extraction.parse_methods.append(storeys_source)
+    if seismic_class is not None:
+        extraction.parse_methods.append(seismic_source)
 
     # Images -------------------------------------------------------------- #
     images = [og_image] if og_image else []

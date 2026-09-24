@@ -80,11 +80,29 @@ def _parse_rooms(text: str) -> int | None:
     return int(m.group(1) or m.group(2))
 
 
+def _unwrap_auto_login(decoded: str) -> str | None:
+    """Extract the real listing URL from an imobiliare `/auto-login/` target.
+
+    Alert card links decode to an `auto-login` URL that carries the actual
+    listing page in its `redirectUrl` query param. Non-listing auto-login
+    targets (no redirectUrl) return None.
+    """
+    parts = urlsplit(decoded)
+    if not parts.path.startswith("/auto-login"):
+        return decoded
+    params = dict(parse_qsl(parts.query))
+    redirect = params.get("redirectUrl", "")
+    if redirect.startswith("http"):
+        return redirect
+    return None
+
+
 def decode_imobiliare_tracking(url: str) -> str | None:
     """Decode the base64-encoded target from a link.imobiliare.ro/click/... URL.
 
     Only `/click/` links point at portal pages; `/external/` links are social
-    media profile URLs and are rejected.
+    media profile URLs and are rejected. `/auto-login/` targets are unwrapped
+    to the real listing URL carried in `redirectUrl`.
     """
     path = urlsplit(url).path
     # require /click/<id>/<b64> (not /external/<id>/<b64>)
@@ -100,7 +118,7 @@ def decode_imobiliare_tracking(url: str) -> str | None:
         return None
     if not decoded.startswith("http"):
         return None
-    return decoded
+    return _unwrap_auto_login(decoded)
 
 
 def is_tracking_url(url: str) -> bool:
