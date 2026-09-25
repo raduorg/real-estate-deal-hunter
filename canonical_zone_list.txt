@@ -1,0 +1,229 @@
+Sector 1 
+
+    Cișmigiu
+
+    Aviatorilor
+
+    Băneasa
+
+    Bucureștii Noi
+
+    Calea Victoriei
+
+    Dămăroaia
+
+    Domenii
+
+    Dorobanți
+
+    Grivița
+
+    Herăstrău / Bordei
+
+    Kiseleff
+
+    Pajura
+
+    Piața Romană
+
+    Piața Victoriei
+
+    Primăverii
+
+    Sala Palatului
+
+    Străulești
+
+    Universitate
+
+Sector 2
+
+    1 Mai
+
+    Andronache
+
+    Baicului
+
+    Barbu Văcărescu
+
+    Colentina
+
+    Dacia
+
+    Doamna Ghica
+
+    Eminescu
+
+    Floreasca
+
+    Fundeni
+
+    Iancului
+
+    Lacul Tei
+
+    Moșilor
+
+    Obor
+
+    Pantelimon
+
+    Ștefan cel Mare
+
+    Tei
+
+    Vatra Luminoasă
+
+Sector 3
+
+    1 Decembrie 1918
+
+    23 August
+
+    Alba Iulia (Piața Alba Iulia)
+
+    Balta Albă
+
+    Basarabia
+
+    Călărași / Calea Călărașilor
+
+    Cățelu
+
+    Centrul Istoric (Lipscani)
+
+    Decebal
+
+    Dristor
+
+    Dudești
+
+    Muncii (Piața Muncii)
+
+    Nerva Traian
+
+    Nicolae Grigorescu
+
+    Ozana
+
+    Republica
+
+    Sălăjan
+
+    Theodor Pallady
+
+    Timpuri Noi
+
+    Titan
+
+    Trapezului
+
+    Unirii
+
+    Vitan
+
+    Vitan Mall
+
+    Vitan-Bârzești
+
+Sector 4
+
+    Apărătorii Patriei
+
+    Berceni
+
+    Brâncoveanu
+
+    Dimitrie Cantemir
+
+    Eroii Revoluției / Pieptănari
+
+    Giurgiului
+
+    Metalurgiei / Grand Arena
+
+    Olteniței
+
+    Piața Reșița
+
+    Progresul
+
+    Șincai
+
+    Tineretului
+
+    Văcărești
+
+Sector 5
+
+    13 Septembrie
+
+    Alexandriei (Șoseaua Alexandriei)
+
+    Antiaeriană
+
+    Cotroceni (South/East section)
+
+    Eroilor
+
+    Ferentari
+
+    Ghencea (Eastern borders)
+
+    Izvor
+
+    Mărgeanului
+
+    Panduri / Marriott
+
+    Petre Ispirescu
+
+    Rahova
+
+    Sălaj
+
+    Sebastian
+
+    Tudor Vladimirescu
+
+    Zețarilor
+
+Sector 6
+
+    Apusului
+
+    Brâncuși
+
+    Cartierul Latin
+
+    Crângași
+
+    Drumul Taberei
+
+    Favorit
+
+    Ghencea
+
+    Giulești
+
+    Gorjului
+
+    Grozăvești
+
+    Lujerului
+
+    Militari
+
+    Orizont
+
+    Păcii
+
+    Politehnica
+
+    Prelungirea Ghencea
+
+    Regie
+
+    Uverturii
+
+    Virtuții

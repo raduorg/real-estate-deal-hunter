@@ -10,10 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 
 from src.deal_calculator.valuator import DealScore
 from src.geocoding.zones import ZoneMatch
 from src.models.listing import Listing, VisionAnalysis
+from src.vision_evaluator.natural_light import (
+    is_natural_light_excluded,
+    natural_light_label,
+)
 
 _PLACEHOLDER_IMAGE = "https://via.placeholder.com/300x200?text=No+Photo"
 
@@ -73,8 +78,54 @@ class DigestDeal:
         return _BADGE_RISK
 
     @property
+    def natural_light_score(self) -> int | None:
+        score = self.deal.natural_light_score
+        if score is None and self.vision is not None:
+            score = self.vision.natural_light_score
+        return score
+
+    @property
+    def natural_light_display(self) -> str:
+        score = self.natural_light_score
+        label = natural_light_label(score)
+        return f"{score}/5 ({label})" if score is not None else label
+
+    @property
+    def natural_light_color(self) -> str:
+        score = self.natural_light_score
+        if score is None:
+            return "#6b7280"
+        if score <= 2:
+            return _BADGE_GOOD
+        if score == 3:
+            return _BADGE_MODERATE
+        return _BADGE_RISK
+
+    @property
+    def natural_light_excluded(self) -> bool:
+        return self.deal.natural_light_excluded or is_natural_light_excluded(
+            self.natural_light_score
+        )
+
+    @property
+    def natural_light_notes(self) -> str:
+        if self.vision and self.vision.natural_light_notes:
+            return self.vision.natural_light_notes
+        return "No daylight notes returned."
+
+    @property
+    def vision_reasoning(self) -> str:
+        if self.vision and self.vision.reasoning:
+            return self.vision.reasoning
+        return "No general vision notes returned."
+
+    @property
     def image_url(self) -> str:
         return (self.listing.image_urls or [_PLACEHOLDER_IMAGE])[0]
+
+
+def is_digest_eligible(deal: DigestDeal) -> bool:
+    return deal.deal.is_deal and not deal.natural_light_excluded
 
 
 def _price_sqm(price_eur: int | None, sqm: float | None) -> float:
@@ -94,7 +145,9 @@ def _card_html(idx: int, deal: DigestDeal) -> str:
     discount = deal.deal.discount_percentage
     score = deal.deal.deal_score
     badge_color = _BADGE_GOOD if score >= _DEAL_GOOD_THRESHOLD else _BADGE_MODERATE
-    flaws = ", ".join(deal.flaws) if deal.flaws else "None observed"
+    flaws = escape(", ".join(deal.flaws) if deal.flaws else "None observed")
+    light_notes = escape(deal.natural_light_notes)
+    vision_notes = escape(deal.vision_reasoning)
 
     return f"""
         <div style="background: #ffffff; border: 1px solid #e5e7eb; border-radius: 8px; margin-bottom: 24px; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
@@ -121,6 +174,18 @@ def _card_html(idx: int, deal: DigestDeal) -> str:
                                 <td><strong style="color: {deal.seismic_color};">{deal.seismic_label}</strong></td>
                             </tr>
                             <tr>
+                                <td style="padding-right: 12px;"><strong>Natural Light:</strong></td>
+                                <td><strong style="color: {deal.natural_light_color};">{deal.natural_light_display}</strong></td>
+                            </tr>
+                            <tr>
+                                <td style="padding-right: 12px;"><strong>Daylight Notes:</strong></td>
+                                <td>{light_notes}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding-right: 12px;"><strong>Vision Notes:</strong></td>
+                                <td>{vision_notes}</td>
+                            </tr>
+                            <tr>
                                 <td style="padding-right: 12px;"><strong>Est. Renovation:</strong></td>
                                 <td>€{renovation:,.0f} (Total: €{adjusted_total:,.0f} &bull; €{adjusted_sqm:,.0f}/m²)</td>
                             </tr>
@@ -142,10 +207,11 @@ def _card_html(idx: int, deal: DigestDeal) -> str:
 
 
 def build_digest_html(deals: list[DigestDeal], total_scanned: int) -> str:
-    """Generates a clean, mobile-responsive HTML digest email."""
+    """Generates a clean, mobile-friendly HTML digest email."""
+    eligible_deals = [deal for deal in deals if is_digest_eligible(deal)]
     now_str = datetime.now().strftime("%d %b %Y, %H:%M")
     cards_html = "".join(
-        _card_html(idx, deal) for idx, deal in enumerate(deals, 1)
+        _card_html(idx, deal) for idx, deal in enumerate(eligible_deals, 1)
     )
 
     return f"""
@@ -156,7 +222,7 @@ def build_digest_html(deals: list[DigestDeal], total_scanned: int) -> str:
         <div style="max-width: 680px; margin: 0 auto;">
             <div style="margin-bottom: 20px;">
                 <h2 style="margin: 0 0 6px 0; color: #111827; font-size: 22px;">🏠 Real Estate Deal Digest</h2>
-                <p style="margin: 0; color: #6b7280; font-size: 14px;">Generated on {now_str} &bull; {total_scanned} listings scanned &bull; <strong>{len(deals)} qualifying deals</strong></p>
+                <p style="margin: 0; color: #6b7280; font-size: 14px;">Generated on {now_str} &bull; {total_scanned} listings scanned &bull; <strong>{len(eligible_deals)} qualifying deals</strong></p>
             </div>
             {cards_html}
             <p style="text-align: center; color: #9ca3af; font-size: 12px; margin-top: 32px;">Automated Real Estate Ingestion Pipeline &bull; Local Gemma4 Vision</p>
@@ -166,4 +232,4 @@ def build_digest_html(deals: list[DigestDeal], total_scanned: int) -> str:
     """
 
 
-__all__ = ["DigestDeal", "build_digest_html"]
+__all__ = ["DigestDeal", "build_digest_html", "is_digest_eligible"]

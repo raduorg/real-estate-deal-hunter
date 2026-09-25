@@ -1,18 +1,24 @@
 """Stage 6: Valuation & deal scoring — pure arithmetic, no I/O, no LLM.
 
 Takes the already-extracted asking price, the vision-estimated renovation
-cost, the zone market average and the seismic risk score, then produces:
+cost, the zone market average, the seismic risk score and the natural-light
+score, then produces:
 
     adjusted_price_sqm     = (price + total_renovation) / sqm
     discount_percentage    = (market_avg - adjusted) / market_avg * 100
-    is_deal                = discount_percentage > deal_threshold
-    deal_score             = weighted blend of discount + condition + seismic
+    is_deal                = discount_percentage > deal_threshold and light is 1..3
+    deal_score             = weighted blend of discount + condition + seismic + light
 """
 
 from __future__ import annotations
 
 from src.models.listing import DealScore, Listing, VisionAnalysis
 from src.seismic.risk import seismic_component
+from src.vision_evaluator.natural_light import (
+    NATURAL_LIGHT_WEIGHT,
+    is_natural_light_excluded,
+    natural_light_component,
+)
 
 # Default deterministic thresholds (Stage 6). Config values may override.
 DEAL_THRESHOLD_PERCENT = 10.0  # discount above this makes the listing a deal
@@ -76,24 +82,37 @@ def deal_score(
     discount_weight: float = DISCOUNT_WEIGHT,
     condition_weight: float = CONDITION_WEIGHT,
     seismic_weight: float = SEISMIC_WEIGHT,
+    natural_light_score: int | None = None,
+    natural_light_weight: float = NATURAL_LIGHT_WEIGHT,
 ) -> float:
-    """Weighted 0..100 blend of market discount, finish quality and seismic safety.
+    """Weighted 0..100 blend of value, condition, seismic and daylight.
 
-    Without a market reference the discount component is dropped (it is not
-    counted as zero); condition and seismic still contribute. An unknown
-    seismic risk neutralizes at 0.5, so missing signals neither help nor hurt.
+    Without a market reference the discount component is dropped. Unknown
+    seismic and natural-light scores neutralize at 0.5, so missing signals
+    neither help nor hurt.
     """
     cond = condition_component(condition_tier)
     seam = seismic_component(seismic_risk)
+    light = natural_light_component(natural_light_score)
     if discount_percent is None:
-        combined = condition_weight + seismic_weight
+        combined = condition_weight + seismic_weight + natural_light_weight
         disc = 0.0
     else:
-        combined = discount_weight + condition_weight + seismic_weight
+        combined = (
+            discount_weight
+            + condition_weight
+            + seismic_weight
+            + natural_light_weight
+        )
         disc = discount_component(discount_percent, max_discount_percent)
     return round(
         100.0
-        * (discount_weight * disc + condition_weight * cond + seismic_weight * seam)
+        * (
+            discount_weight * disc
+            + condition_weight * cond
+            + seismic_weight * seam
+            + natural_light_weight * light
+        )
         / combined,
         1,
     )
@@ -108,22 +127,32 @@ def evaluate_deal(
     discount_weight: float = DISCOUNT_WEIGHT,
     condition_weight: float = CONDITION_WEIGHT,
     seismic_weight: float = SEISMIC_WEIGHT,
+    natural_light_weight: float = NATURAL_LIGHT_WEIGHT,
 ) -> DealScore:
     """Full Stage 6 pass: fill DealScore via pure arithmetic.
 
     Missing price/sqm degrade to a defensive result (no deal, no renovation
     spend) rather than raising — the orchestrator treats it as 'do not alert'.
     """
+    light_excluded = is_natural_light_excluded(analysis.natural_light_score)
     sqm = listing.sqm
     if listing.price_eur is None or not sqm or sqm <= 0:
-        return DealScore(listing_id=listing.id)
+        return DealScore(
+            listing_id=listing.id,
+            natural_light_score=analysis.natural_light_score,
+            natural_light_excluded=light_excluded,
+        )
 
     renovation = total_renovation_cost(analysis.estimated_renovation_cost_eur_per_sqm, sqm)
     adjusted = adjusted_price_per_sqm(listing.price_eur, renovation, sqm)
     assert adjusted is not None
 
     disc = discount_percent(market_average_per_sqm, adjusted)
-    is_deal = disc is not None and disc > deal_threshold_percent
+    is_deal = (
+        disc is not None
+        and disc > deal_threshold_percent
+        and not light_excluded
+    )
 
     return DealScore(
         listing_id=listing.id,
@@ -140,9 +169,13 @@ def evaluate_deal(
             discount_weight,
             condition_weight,
             seismic_weight,
+            analysis.natural_light_score,
+            natural_light_weight,
         ),
         condition_tier=analysis.condition_tier,
         seismic_risk=listing.seismic_risk,
+        natural_light_score=analysis.natural_light_score,
+        natural_light_excluded=light_excluded,
     )
 
 
@@ -150,6 +183,7 @@ __all__ = [
     "DISCOUNT_WEIGHT",
     "CONDITION_WEIGHT",
     "SEISMIC_WEIGHT",
+    "NATURAL_LIGHT_WEIGHT",
     "CONDITION_TIER_SCORES",
     "DEAL_THRESHOLD_PERCENT",
     "MAX_DISCOUNT_PERCENT",
@@ -161,5 +195,7 @@ __all__ = [
     "discount_component",
     "discount_percent",
     "evaluate_deal",
+    "is_natural_light_excluded",
+    "natural_light_component",
     "total_renovation_cost",
 ]

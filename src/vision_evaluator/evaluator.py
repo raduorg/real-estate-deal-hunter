@@ -19,6 +19,10 @@ from src.config import Config, VisionConfig
 from src.email_listener.db import Database
 from src.models.listing import Listing, ListingStatus, VisionAnalysis
 from src.vision_evaluator.images import ImageDownloader, to_base64
+from src.vision_evaluator.natural_light import (
+    NATURAL_LIGHT_MAX_SCORE,
+    NATURAL_LIGHT_MIN_SCORE,
+)
 from src.vision_evaluator.prompts import (
     SYSTEM_PROMPT,
     build_user_prompt,
@@ -77,6 +81,24 @@ def parse_analysis_response(
         renovation = 0
     renovation = max(0, min(1500, renovation))
 
+    light_score: int | None = None
+    light_raw = data.get("natural_light_score")
+    if light_raw is not None and not isinstance(light_raw, bool):
+        try:
+            light_value = float(light_raw)
+        except (TypeError, ValueError):
+            light_value = -1.0
+        if (
+            light_value.is_integer()
+            and NATURAL_LIGHT_MIN_SCORE <= light_value <= NATURAL_LIGHT_MAX_SCORE
+        ):
+            light_score = int(light_value)
+        else:
+            logger.warning(
+                "Vision invalid natural_light_score=%r; defaulting to unknown",
+                light_raw,
+            )
+
     breakers_raw = data.get("deal_breakers", [])
     breakers = (
         [str(b).strip() for b in breakers_raw if str(b).strip()]
@@ -92,7 +114,9 @@ def parse_analysis_response(
         window_type=_enum("window_type"),
         deal_breakers=breakers,
         image_score=score,
-        reasoning=str(data.get("reasoning", "")).strip(),
+        natural_light_score=light_score,
+        natural_light_notes=str(data.get("natural_light_notes") or "").strip(),
+        reasoning=str(data.get("reasoning") or "").strip(),
     )
 
 
@@ -142,11 +166,12 @@ class VisionEvaluator:
 
         analysis = parse_analysis_response(content, listing.id, allowed=self.allowed)
         logger.info(
-            "Vision %s: tier=%s score=%.1f reno=%d EUR/sqm breakers=%d",
+            "Vision %s: tier=%s score=%.1f reno=%d EUR/sqm light=%s breakers=%d",
             listing.id,
             analysis.condition_tier,
             analysis.image_score,
             analysis.estimated_renovation_cost_eur_per_sqm,
+            analysis.natural_light_score,
             len(analysis.deal_breakers),
         )
         return analysis
@@ -183,7 +208,13 @@ class VisionEvaluator:
                     raise VisionError("empty assistant content")
                 # The reply must already be valid JSON for the schema to matter;
                 # a malformed reply is worth a retry (transient model slip).
-                json.loads(_strip_code_fence(content))
+                parsed = json.loads(_strip_code_fence(content))
+                if not isinstance(parsed, dict):
+                    raise VisionError("model returned non-object JSON")
+                for field in ("reasoning", "natural_light_notes"):
+                    value = parsed.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        raise VisionError(f"model returned empty {field}")
                 return content.strip()
             except (httpx.HTTPError, VisionError, json.JSONDecodeError) as exc:
                 last_error = exc

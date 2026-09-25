@@ -76,8 +76,8 @@ class NotifierConfig:
 class DealConfig:
     """Stage 6 valuation & deal scoring thresholds (pure arithmetic).
 
-    discount_weight + condition_weight + seismic_weight should sum to 1.0;
-    seismic carries ~25% by default per the Bucharest earthquake rationale.
+    The weights are relative; the deal score normalizes their sum. Seismic
+    safety and natural light carry equal weight by default.
     """
 
     deal_threshold_percent: float = 10.0
@@ -86,6 +86,7 @@ class DealConfig:
     condition_weight: float = 0.15
     seismic_weight: float = 0.25
     min_price_eur: int = 10_000
+    natural_light_weight: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -160,6 +161,7 @@ def load_config(env_path: str | Path | None = None) -> Config:
             discount_weight=float(os.getenv("DEAL_DISCOUNT_WEIGHT", "0.60")),
             condition_weight=float(os.getenv("DEAL_CONDITION_WEIGHT", "0.15")),
             seismic_weight=float(os.getenv("DEAL_SEISMIC_WEIGHT", "0.25")),
+            natural_light_weight=float(os.getenv("DEAL_NATURAL_LIGHT_WEIGHT", "0.25")),
             min_price_eur=int(os.getenv("DEAL_MIN_PRICE_EUR", "10000")),
         ),
         notifier=NotifierConfig(

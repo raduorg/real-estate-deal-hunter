@@ -56,6 +56,8 @@ class VisionAnalysis(BaseModel):
     window_type: str = "unknown"
     deal_breakers: list[str] = Field(default_factory=list)
     image_score: float = 0.0
+    natural_light_score: int | None = None
+    natural_light_notes: str = ""
     reasoning: str = ""
 
 
@@ -69,3 +71,5 @@ class DealScore(BaseModel):
     deal_score: float = 0.0
     condition_tier: str = "unknown"
     seismic_risk: int | None = None
+    natural_light_score: int | None = None
+    natural_light_excluded: bool = False

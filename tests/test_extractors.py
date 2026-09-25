@@ -241,6 +241,56 @@ class TestDatabaseMigration:
         await db.close()
 
 
+class TestZonePricingQueries:
+    async def test_returns_all_statuses_and_excludes_invalid_values(self, tmp_path):
+        db = Database(tmp_path / "zone-prices.db")
+        await db.connect()
+        try:
+            listings = [
+                Listing(
+                    id="new",
+                    url="https://example.test/new",
+                    price_eur=100_000,
+                    sqm=50,
+                    status=ListingStatus.NEW,
+                ),
+                Listing(
+                    id="skipped",
+                    url="https://example.test/skipped",
+                    price_eur=200_000,
+                    sqm=50,
+                    status=ListingStatus.SKIPPED,
+                ),
+                Listing(
+                    id="alerted",
+                    url="https://example.test/alerted",
+                    price_eur=300_000,
+                    sqm=50,
+                    status=ListingStatus.ALERTED,
+                ),
+                Listing(
+                    id="missing-price",
+                    url="https://example.test/missing-price",
+                    price_eur=None,
+                    sqm=50,
+                ),
+                Listing(
+                    id="invalid-area",
+                    url="https://example.test/invalid-area",
+                    price_eur=100_000,
+                    sqm=0,
+                ),
+            ]
+            for listing in listings:
+                await db.save_listing(listing)
+
+            rows = await db.get_listings_for_zone_pricing()
+
+            assert {row.id for row in rows} == {"new", "skipped", "alerted"}
+        finally:
+            await db.close()
+
+
 class TestFetcher:
     async def test_fetch_ok(self):
         config = ExtractorConfig(min_delay=0, max_delay=0, timeout=2, max_retries=2)

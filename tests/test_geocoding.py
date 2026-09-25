@@ -6,8 +6,22 @@ from pathlib import Path
 import pytest
 
 from src.geocoding.filter import FinancialVerdict, is_financially_viable
-from src.geocoding.prices import DEFAULT_ZONE_PRICES, load_zone_prices
-from src.geocoding.zones import ZoneIndex, ZoneResolver, canonical_zone_name
+from src.geocoding.prices import (
+    DEFAULT_ZONE_PRICES,
+    calculate_zone_avg_prices_eur_per_sqm,
+    load_zone_prices,
+)
+from src.geocoding.zones import (
+    NEIGHBORHOODS_BY_SECTOR,
+    Neighborhood,
+    Sector,
+    ZoneIndex,
+    ZoneResolver,
+    canonical_neighborhood_name,
+    canonical_zone_name,
+    load_canonical_zone_list,
+    neighborhoods_in_text,
+)
 from src.models.listing import Listing
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "zones"
@@ -61,6 +75,17 @@ class TestZoneIndex:
         assert canonical_zone_name("Bucharest") == "Bucuresti"
         assert canonical_zone_name(None) is None
 
+    def test_canonical_catalog_matches_neighborhood_enums(self) -> None:
+        catalog = load_canonical_zone_list()
+        assert catalog == load_canonical_zone_list()
+        for sector, neighborhoods in NEIGHBORHOODS_BY_SECTOR.items():
+            assert catalog[sector] == neighborhoods
+        assert Neighborhood.DRISTOR in catalog[Sector.SECTOR_3]
+
+    def test_neighborhood_aliases_preserve_diacritics(self) -> None:
+        assert neighborhoods_in_text("Bucuresti, cartierul Primăverii") == ["Primăverii"]
+        assert canonical_neighborhood_name("cartierul Primăverie") == "Primăverii"
+
 
 class TestZoneResolver:
     def test_resolve_with_coords(self, zone_index: ZoneIndex) -> None:
@@ -76,6 +101,37 @@ class TestZoneResolver:
         assert not match.matched
         assert match.zone == ""
         assert match.avg_price_sqm is None
+
+    def test_neighborhood_is_preferred_to_sector(self) -> None:
+        listing = make_listing(None, None, 120000, 55)
+        listing.neighborhood = "Primăverii"
+        resolver = ZoneResolver(
+            prices={"Primăverii": 3000.0, "Sector 1": 2500.0}
+        )
+        match = resolver.resolve(listing, body_text="Sector 1")
+        assert match.zone == "Primăverii"
+        assert match.neighborhood == "Primăverii"
+        assert match.sector == "Sector 1"
+        assert match.kind.value == "neighborhood"
+        assert match.avg_price_sqm == pytest.approx(3000.0)
+
+    def test_unknown_neighborhood_falls_back_to_sector_text(self) -> None:
+        listing = make_listing(None, None, 120000, 55)
+        listing.address = "Bucuresti, sectorul 4"
+        resolver = ZoneResolver(prices=DEFAULT_ZONE_PRICES)
+        match = resolver.resolve(listing)
+        assert match.zone == "Sector 4"
+        assert match.sector == "Sector 4"
+        assert match.neighborhood is None
+        assert match.kind.value == "sector"
+
+    def test_body_text_resolves_neighborhood(self) -> None:
+        listing = make_listing(None, None, 120000, 55)
+        resolver = ZoneResolver(prices=DEFAULT_ZONE_PRICES)
+        match = resolver.resolve(listing, body_text="Cartierul Giulești")
+        assert match.zone == "Giulești"
+        assert match.sector == "Sector 6"
+        assert match.avg_price_sqm == DEFAULT_ZONE_PRICES["Sector 6"]
 
 
 class TestFinancialFilter:
@@ -132,6 +188,47 @@ class TestZonePrices:
         assert prices["Sector 1"] == 2700.0
         assert prices["Sector 4"] == DEFAULT_ZONE_PRICES["Sector 4"]
 
+    def test_load_zone_prices_accepts_neighborhood_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "ZONE_AVG_PRICES_EUR_PER_SQM",
+            json.dumps({"Primăverii": 3100.0}),
+        )
+        prices = load_zone_prices()
+        listing = make_listing(None, None, 120000, 55)
+        listing.neighborhood = "Primăverii"
+        match = ZoneResolver(prices=prices).resolve(listing)
+        assert match.avg_price_sqm == pytest.approx(3100.0)
+
     def test_load_zone_prices_ignores_bad_json(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ZONE_AVG_PRICES_EUR_PER_SQM", "not json")
         assert load_zone_prices() == DEFAULT_ZONE_PRICES
+
+    def test_calculated_prices_use_all_valid_listings(self, zone_index: ZoneIndex) -> None:
+        resolver = ZoneResolver(zone_index, prices=DEFAULT_ZONE_PRICES)
+        prices = calculate_zone_avg_prices_eur_per_sqm(
+            [
+                make_listing(44.4325, 26.1039, 100_000, 50),
+                make_listing(44.4325, 26.1039, 200_000, 50),
+                make_listing(44.4847, 26.0769, 300_000, 50),
+                make_listing(44.4325, 26.1039, None, 50),
+                make_listing(44.4325, 26.1039, 100_000, 0),
+            ],
+            resolver,
+        )
+
+        assert prices["Sector 3"] == pytest.approx(3_000)
+        assert prices["Sector 1"] == pytest.approx(6_000)
+
+    def test_derived_prices_are_overridden_by_explicit_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv(
+            "ZONE_AVG_PRICES_EUR_PER_SQM",
+            json.dumps({"Sector 3": 2800}),
+        )
+        prices = load_zone_prices(derived_prices={"Sector 3": 2500, "Sector 1": 2600})
+
+        assert prices["Sector 3"] == 2800
+        assert prices["Sector 1"] == 2600

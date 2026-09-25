@@ -24,12 +24,14 @@ from src.geocoding.filter import FinancialResult, FinancialVerdict
 from src.geocoding.prices import DEFAULT_ZONE_PRICES
 from src.geocoding.zones import ZoneIndex, ZoneMatch, ZoneResolver
 from src.models.extraction import PageExtraction
-from src.models.listing import Listing, ListingSource, ListingStatus
+from src.models.listing import Listing, ListingSource, ListingStatus, VisionAnalysis
+from src.notifier.digest_builder import DigestDeal, build_digest_html, is_digest_eligible
 from src.orchestration.graph import PipelineBuilder, evaluate_gate, merge_extraction
 from src.vision_evaluator.evaluator import VisionEvaluator
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "zones"
 SECTOR_3_AVG = DEFAULT_ZONE_PRICES["Sector 3"]
+SECTOR_5_AVG = DEFAULT_ZONE_PRICES["Sector 5"]
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNg"
@@ -81,6 +83,20 @@ BASEMENT_HTML = """<!DOCTYPE html><html><head>
   <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
 </head><body></body></html>"""
 
+# Clickbait: location field pins a Sector 3 address (and coords match), but the
+# agent's own prose names the real zone. 134.750 EUR / 55 mp = 2450 EUR/sqm is
+# inside the Sector 3 band (< 2502.5) yet exceeds the Sector 5 ceiling
+# (2437.5), so the honest zone flips the listing from viable to too-expensive.
+CLICKBAIT_HTML = """<!DOCTYPE html><html><head>
+  <meta property="og:title" content="Apartament 2 camere, 55 mp, 134.750 Euro - Bucuresti, Sector 3" />
+  <meta property="og:description" content="Apartament de vanzare, 2 camere, 55 mp, 134.750 Euro, etaj 2, central" />
+  <meta property="og:image" content="https://cdn.test/1.png" />
+  <script>window.__STATE__ = {"lat": 44.4325, "lng": 26.1039};</script>
+</head><body><h1>Apartament - Sector 3</h1>
+  <p>Apartamentul de 2 camere este situat in sectorul 5, la 2 minute de Piata Sudului.</p>
+  <p>Bloc cu lift, etaj 2.</p>
+</body></html>"""
+
 
 def make_config(tmp_path: Path) -> Config:
     return Config(
@@ -113,7 +129,10 @@ def make_listing(
 
 
 def ollama_json(
-    renovation: int = 100, tier: str = "habitable_dated", score: float = 6.5
+    renovation: int = 100,
+    tier: str = "habitable_dated",
+    score: float = 6.5,
+    natural_light_score: int = 2,
 ) -> str:
     return json.dumps(
         {
@@ -123,19 +142,26 @@ def ollama_json(
             "window_type": "modern_pvc",
             "deal_breakers": ["old_fuse_box"],
             "image_score": score,
+            "natural_light_score": natural_light_score,
+            "natural_light_notes": "Good daylight from the main windows.",
             "reasoning": "Dated but functional.",
         }
     )
 
 
-def make_transport(html: str) -> httpx.MockTransport:
+def make_transport(html: str, vision_content: str | None = None) -> httpx.MockTransport:
     """One transport serving the listing page, the image CDN and Ollama."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/chat":
             return httpx.Response(
                 200,
-                json={"message": {"role": "assistant", "content": ollama_json()}},
+                json={
+                    "message": {
+                        "role": "assistant",
+                        "content": vision_content or ollama_json(),
+                    }
+                },
             )
         if request.url.host == "cdn.test":
             return httpx.Response(200, content=PNG_BYTES, headers={"content-type": "image/png"})
@@ -145,10 +171,10 @@ def make_transport(html: str) -> httpx.MockTransport:
 
 
 async def build_runner(
-    tmp_path: Path, html: str
+    tmp_path: Path, html: str, vision_content: str | None = None
 ) -> tuple[PipelineBuilder, Config, Listing]:
     config = make_config(tmp_path)
-    transport = make_transport(html)
+    transport = make_transport(html, vision_content)
     db = Database(config.database_path)
     await db.connect()
 
@@ -221,6 +247,73 @@ class TestMergeExtraction:
 
 
 class TestPipelineGraph:
+    async def test_refresh_zone_prices_uses_all_listings(self, tmp_path: Path) -> None:
+        builder, _config, _listing = await build_runner(tmp_path, LISTING_HTML)
+        historical = [
+            Listing(
+                id="historical-1",
+                url="https://example.test/historical-1",
+                price_eur=100_000,
+                sqm=50,
+                latitude=44.4325,
+                longitude=26.1039,
+                status=ListingStatus.SKIPPED,
+            ),
+            Listing(
+                id="historical-2",
+                url="https://example.test/historical-2",
+                price_eur=200_000,
+                sqm=50,
+                latitude=44.4325,
+                longitude=26.1039,
+                status=ListingStatus.ALERTED,
+            ),
+            Listing(
+                id="historical-3",
+                url="https://example.test/historical-3",
+                price_eur=300_000,
+                sqm=50,
+                latitude=44.4847,
+                longitude=26.0769,
+                status=ListingStatus.ANALYZED,
+            ),
+        ]
+        try:
+            for listing in historical:
+                await builder.db.save_listing(listing)
+            prices = await builder.refresh_zone_prices()
+
+            assert prices["Sector 3"] == pytest.approx(3_000)
+            assert prices["Sector 1"] == pytest.approx(6_000)
+            match = builder.resolver.resolve(
+                Listing(
+                    id="probe",
+                    url="https://example.test/probe",
+                    latitude=44.4325,
+                    longitude=26.1039,
+                )
+            )
+            assert match.avg_price_sqm == pytest.approx(3_000)
+        finally:
+            await builder.close()
+
+    async def test_verify_zone_uses_body_neighborhood(self, tmp_path: Path) -> None:
+        builder, _config, listing = await build_runner(tmp_path, LISTING_HTML)
+        extraction = PageExtraction(
+            listing_id=listing.id,
+            body_text="Apartamentul este situat in cartierul Giulești.",
+        )
+        try:
+            result = await builder.verify_zone(
+                {"listing": listing, "extraction": extraction}
+            )
+            zone = result["zone_match"]
+            assert zone.zone == "Giulești"
+            assert zone.sector == "Sector 6"
+            assert zone.neighborhood == "Giulești"
+        finally:
+            await builder.close()
+
     async def test_full_viable_listing_ends_as_deal(self, tmp_path: Path) -> None:
         builder, _config, listing = await build_runner(tmp_path, LISTING_HTML)
 
@@ -251,6 +344,24 @@ class TestPipelineGraph:
             assert saved["passed_sanity"] is True
             assert saved["financial"]["verdict"] == "viable"
             assert saved["deal"]["is_deal"] is True
+        finally:
+            await builder.close()
+
+    @pytest.mark.parametrize("natural_light_score", [4, 5])
+    async def test_very_little_or_no_natural_light_is_not_a_deal(
+        self, tmp_path: Path, natural_light_score: int
+    ) -> None:
+        builder, _config, listing = await build_runner(
+            tmp_path,
+            LISTING_HTML,
+            ollama_json(natural_light_score=natural_light_score),
+        )
+        try:
+            final = await builder.build_graph().ainvoke({"listing": listing})
+            assert final["vision"].natural_light_score == natural_light_score
+            assert final["deal"].natural_light_excluded
+            assert not final["deal"].is_deal
+            assert final["deal"].natural_light_score == natural_light_score
         finally:
             await builder.close()
 
@@ -376,6 +487,40 @@ class TestPipelineGraph:
             assert await builder.db.get_pipeline_result(listing.id) is None
         finally:
             await builder.close()
+
+    async def test_clickbait_location_overridden_by_description(self, tmp_path: Path) -> None:
+        builder, config, listing = await build_runner(tmp_path, CLICKBAIT_HTML)
+
+        try:
+            # A routing lapse to vision would mean the honest zone failed to
+            # reject the listing as overpriced.
+            builder.vision_evaluator = VisionEvaluator(
+                config, builder.db, transport=httpx.MockTransport(
+                    lambda request: pytest.fail(f"unexpected call: {request.url}")
+                )
+            )
+
+            graph = builder.build_graph()
+            final = await graph.ainvoke({"listing": listing})
+
+            zone = final["zone_match"]
+            assert zone.zone == "Sector 5"
+            assert zone.method == "description_discrepancy"
+            assert zone.avg_price_sqm == pytest.approx(SECTOR_5_AVG)  # honest zone is cheaper
+
+            verification = final["zone_verification"]
+            assert verification.corrected_zone == "Sector 5"
+            assert verification.discrepancy
+
+            assert final["financial"].verdict == FinancialVerdict.TOO_EXPENSIVE
+            assert "deal" not in final
+            assert "vision" not in final
+
+            skipped = await builder.db.get_listings_by_status(ListingStatus.SKIPPED)
+            assert [r.id for r in skipped] == [listing.id]
+        finally:
+            await builder.close()
+
     async def test_save_and_get_pipeline_result(self, tmp_path: Path) -> None:
         db = Database(tmp_path / "p.db")
 
@@ -410,3 +555,48 @@ class TestPipelineGraph:
             assert saved["deal"]["deal_score"] == pytest.approx(48.5)
         finally:
             await db.close()
+
+
+class TestDigestRendering:
+    def test_natural_light_and_vision_notes_are_rendered(self) -> None:
+        listing = Listing(
+            id="digest-test",
+            url="https://example.test/listing",
+            price_eur=80_000,
+            sqm=55,
+            image_urls=["https://cdn.test/photo.png"],
+        )
+        deal = DealScore(
+            listing_id=listing.id,
+            adjusted_price_per_sqm=1_700,
+            market_average_per_sqm=1_925,
+            discount_percentage=12,
+            is_deal=True,
+            deal_score=75,
+            condition_tier="renovated_standard",
+            seismic_risk=1,
+            natural_light_score=2,
+        )
+        vision = VisionAnalysis(
+            listing_id=listing.id,
+            natural_light_score=2,
+            natural_light_notes="Bright <daylight> through large windows.",
+            reasoning="Kitchen and bathroom were recently renewed.",
+        )
+        item = DigestDeal(listing=listing, deal=deal, vision=vision)
+        assert is_digest_eligible(item)
+        html = build_digest_html([item], total_scanned=1)
+        assert "Natural Light:" in html
+        assert "2/5 (good)" in html
+        assert "Bright &lt;daylight&gt;" in html
+        assert "Kitchen and bathroom were recently renewed." in html
+
+    def test_low_natural_light_is_not_digest_eligible(self) -> None:
+        listing = Listing(id="dark", url="https://example.test/dark")
+        deal = DealScore(listing_id=listing.id, is_deal=True, natural_light_score=4)
+        vision = VisionAnalysis(listing_id=listing.id, natural_light_score=4)
+        item = DigestDeal(listing=listing, deal=deal, vision=vision)
+        assert not is_digest_eligible(item)
+        html = build_digest_html([item], total_scanned=1)
+        assert "0 qualifying deals" in html
+        assert "Natural Light:" not in html

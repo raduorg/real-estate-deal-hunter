@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from src.deal_calculator.valuator import (
+    DEAL_THRESHOLD_PERCENT,
     DealScore,
     adjusted_price_per_sqm,
     condition_component,
@@ -10,6 +11,8 @@ from src.deal_calculator.valuator import (
     discount_component,
     discount_percent,
     evaluate_deal,
+    is_natural_light_excluded,
+    natural_light_component,
     total_renovation_cost,
 )
 from src.models.listing import Listing, VisionAnalysis
@@ -32,12 +35,15 @@ def make_listing(
 
 
 def make_analysis(
-    renovation: int = 200, tier: str = "habitable_dated"
+    renovation: int = 200,
+    tier: str = "habitable_dated",
+    natural_light_score: int | None = 3,
 ) -> VisionAnalysis:
     return VisionAnalysis(
         listing_id="deal-test",
         condition_tier=tier,
         estimated_renovation_cost_eur_per_sqm=renovation,
+        natural_light_score=natural_light_score,
     )
 
 
@@ -73,26 +79,52 @@ class TestArithmetic:
 
 class TestDealScore:
     def test_weighted_blend_with_no_seismic_risk(self) -> None:
-        # 15% discount -> 0.375; habitable_dated -> 0.5; unknown seismic -> 0.5
-        # 100 * (0.6*0.375 + 0.15*0.5 + 0.25*0.5) / 1.0 = 42.5
-        assert deal_score(15.0, "habitable_dated", None) == pytest.approx(42.5)
+        assert deal_score(15.0, "habitable_dated", None) == pytest.approx(44.0)
 
     def test_seismic_risk_moves_the_score(self) -> None:
-        # Same discount/condition; seismic 1 (safest) vs 4 (risky).
-        assert deal_score(15.0, "habitable_dated", 1) == pytest.approx(55.0)
-        assert deal_score(15.0, "habitable_dated", 4) == pytest.approx(36.2)
+        assert deal_score(15.0, "habitable_dated", 1) == pytest.approx(54.0)
+        assert deal_score(15.0, "habitable_dated", 4) == pytest.approx(39.0)
         assert deal_score(15.0, "habitable_dated", 1) > deal_score(
             15.0, "habitable_dated", 4
         )
 
     def test_no_market_reference_scores_condition_and_seismic_only(self) -> None:
-        # discount unknown -> discount weight dropped; 0.5 condition, 0.5 seismic
-        # 100 * (0.15*0.5 + 0.25*0.5) / 0.4 = 50
         assert deal_score(None, "habitable_dated", None) == pytest.approx(50.0)
 
     def test_overpriced_clamps_to_condition_and_seismic(self) -> None:
-        # discount clamped to 0; risk 1 (safe) keeps a floor on the score.
-        assert deal_score(-10.0, "needs_total_renovation", 1) == pytest.approx(28.7)
+        assert deal_score(-10.0, "needs_total_renovation", 1) == pytest.approx(33.0)
+
+
+class TestNaturalLight:
+    def test_curve_and_exclusion(self) -> None:
+        assert natural_light_component(None) == pytest.approx(0.5)
+        assert natural_light_component(1) == pytest.approx(1.0)
+        assert natural_light_component(3) == pytest.approx(0.5)
+        assert natural_light_component(4) == pytest.approx(0.25)
+        assert natural_light_component(5) == pytest.approx(0.0)
+        assert not is_natural_light_excluded(3)
+        assert is_natural_light_excluded(4)
+        assert is_natural_light_excluded(5)
+
+    def test_natural_light_has_the_same_weight_as_seismic(self) -> None:
+        base = deal_score(15.0, "habitable_dated", 3, natural_light_score=3)
+        good_light = deal_score(15.0, "habitable_dated", 3, natural_light_score=1)
+        poor_light = deal_score(15.0, "habitable_dated", 3, natural_light_score=5)
+        good_seismic = deal_score(15.0, "habitable_dated", 1, natural_light_score=3)
+        poor_seismic = deal_score(15.0, "habitable_dated", 5, natural_light_score=3)
+        assert good_light - base == pytest.approx(base - poor_light)
+        assert good_seismic - base == pytest.approx(base - poor_seismic)
+
+    def test_four_and_five_are_not_qualifying_deals(self) -> None:
+        for score in (4, 5):
+            result = evaluate_deal(
+                make_listing(80_000, 55, seismic_risk=1),
+                make_analysis(renovation=200, tier="renovated_standard", natural_light_score=score),
+                SECTOR_3_AVG,
+            )
+            assert result.discount_percentage > DEAL_THRESHOLD_PERCENT
+            assert result.natural_light_excluded
+            assert not result.is_deal
 
 
 class TestEvaluateDeal:
@@ -110,8 +142,7 @@ class TestEvaluateDeal:
         assert result.is_deal
         assert result.condition_tier == "renovated_standard"
         assert result.seismic_risk == 1
-        # 100 * (0.6 * 14.05/40 + 0.15 * 0.75 + 0.25 * 1.0) = 57.3
-        assert result.deal_score == pytest.approx(57.3, abs=0.1)
+        assert result.deal_score == pytest.approx(55.9, abs=0.1)
 
     def test_reno_wipes_discount_no_deal(self) -> None:
         # 100k + 300/sqm reno on 55sqm => adjusted 2118; market 1925 => -10% (overpriced)
@@ -123,8 +154,7 @@ class TestEvaluateDeal:
         assert not result.is_deal
         assert result.discount_percentage < 0
         assert result.seismic_risk == 2
-        # condition 0.25, seismic 2 -> 0.75: 100*(0.15*0.25+0.25*0.75) = 22.5
-        assert result.deal_score == pytest.approx(22.5)
+        assert result.deal_score == pytest.approx(28.0)
 
     def test_seismic_risk_poor_building_needs_more_discount(self) -> None:
         # Same deal with a risky (4/5) building scores lower than a safe one.
@@ -167,7 +197,7 @@ class TestEvaluateDeal:
             discount_weight=0.5,
             condition_weight=0.5,
             seismic_weight=0.0,
+            natural_light_weight=0.0,
         )
         assert result.is_deal
-        # 100 * (0.5*0.351 + 0.5*0.75) = 55.06
         assert result.deal_score == pytest.approx(55.1)

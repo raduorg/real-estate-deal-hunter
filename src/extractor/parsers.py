@@ -535,6 +535,9 @@ def extract_from_html(
         if not description and node.get("description"):
             description = str(node["description"])
     extraction.description = _clean(description)
+    # Page body (agent prose) kept apart from portal-generated `description`,
+    # which normally mirrors the chosen location field. Truncated for storage.
+    extraction.body_text = text[:6000]
 
     # Price --------------------------------------------------------------- #
     # 1) og:description is portal-generated and short -> regex noise is minimal.

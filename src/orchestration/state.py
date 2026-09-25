@@ -12,6 +12,7 @@ from typing import TypedDict
 
 from src.deal_calculator.valuator import DealScore
 from src.geocoding.filter import FinancialResult
+from src.geocoding.verify import ZoneVerification
 from src.geocoding.zones import ZoneMatch
 from src.models.extraction import PageExtraction
 from src.models.listing import Listing, VisionAnalysis
@@ -29,6 +30,7 @@ class ListingState(TypedDict, total=False):
     filter: str | None
     seismic: int | None
     zone_match: ZoneMatch
+    zone_verification: ZoneVerification
     financial: FinancialResult
     vision: VisionAnalysis
     deal: DealScore

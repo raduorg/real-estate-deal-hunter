@@ -9,6 +9,11 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
+from src.vision_evaluator.natural_light import (
+    NATURAL_LIGHT_MAX_SCORE,
+    NATURAL_LIGHT_MIN_SCORE,
+)
+
 CONDITION_TIERS = [
     "needs_total_renovation",
     "habitable_dated",
@@ -26,7 +31,8 @@ assessment of the property's physical condition.
 
 Rules:
 - Judge only what is actually visible in the photos. Absence of evidence is
-  "unknown", never a guess.
+  "unknown", never a guess, except where a field explicitly defines an
+  uncertainty fallback.
 - Floors: parquet is higher quality than laminate; cracked or worn tiles lower
   the score. Joinery: modern PVC windows are better than old wooden frames.
 - Hardwood parquet, marble, designer finishes, new reno => "luxury" or
@@ -35,10 +41,18 @@ Rules:
 - estimated_renovation_cost_eur_per_sqm = approx EUR/sqm needed to bring the
   property to modern "renovated_standard" (0 for already renovated, up to ~800
   for gut renovation).
+- natural_light_score measures daylight only, never artificial lighting, lamps,
+  camera flash, or exposure. Use visible windows, daylight, shadows, room depth,
+  and obstructions; do not infer an unseen orientation. 1 = abundant daylight,
+  2 = good, 3 = adequate or mixed, 4 = very little, 5 = none at all. If the
+  photos do not provide enough evidence, use 3 and explain the uncertainty in
+  natural_light_notes.
 - image_score: 0-10 quality-of-condition barometer for a hypothetical buyer.
 - deal_breakers: only objective red flags actually visible, e.g.
   "visible_moisture_stains", "mold", "outdated_fuse_box", "cracked_structure",
   "water_stains_on_ceiling".
+- reasoning and natural_light_notes must be concise, evidence-based comments
+  grounded in the photos, not empty strings or generic conclusions.
 - Reply with JSON only, matching the requested format exactly."""
 
 VISION_JSON_SCHEMA: dict[str, Any] = {
@@ -54,6 +68,12 @@ VISION_JSON_SCHEMA: dict[str, Any] = {
         "window_type": {"type": "string", "enum": WINDOW_TYPES},
         "deal_breakers": {"type": "array", "items": {"type": "string"}},
         "image_score": {"type": "number", "minimum": 0, "maximum": 10},
+        "natural_light_score": {
+            "type": "integer",
+            "minimum": NATURAL_LIGHT_MIN_SCORE,
+            "maximum": NATURAL_LIGHT_MAX_SCORE,
+        },
+        "natural_light_notes": {"type": "string"},
         "reasoning": {"type": "string"},
     },
     "required": [
@@ -63,6 +83,8 @@ VISION_JSON_SCHEMA: dict[str, Any] = {
         "window_type",
         "deal_breakers",
         "image_score",
+        "natural_light_score",
+        "natural_light_notes",
         "reasoning",
     ],
 }

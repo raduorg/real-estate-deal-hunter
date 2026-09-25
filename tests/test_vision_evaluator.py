@@ -16,7 +16,7 @@ from src.vision_evaluator.evaluator import (
     parse_analysis_response,
 )
 from src.vision_evaluator.images import ImageDownloader, to_base64, validate_image
-from src.vision_evaluator.prompts import build_user_prompt, vision_json_schema
+from src.vision_evaluator.prompts import SYSTEM_PROMPT, build_user_prompt, vision_json_schema
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNg"
@@ -68,6 +68,8 @@ def valid_ollama_content() -> str:
             "window_type": "modern_pvc",
             "deal_breakers": ["old_fuse_box"],
             "image_score": 6.5,
+            "natural_light_score": 2,
+            "natural_light_notes": "Good daylight from the living-room windows.",
             "reasoning": "Dated but functional finishes.",
         }
     )
@@ -124,6 +126,7 @@ class TestPrompts:
         assert "centrala termica" in prompt
 
     def test_vision_json_schema_has_required_fields(self):
+        assert "never artificial lighting" in SYSTEM_PROMPT
         schema = vision_json_schema()
         props = schema["properties"]
         assert schema["type"] == "object"
@@ -134,6 +137,8 @@ class TestPrompts:
             "window_type",
             "deal_breakers",
             "image_score",
+            "natural_light_score",
+            "natural_light_notes",
             "reasoning",
         ):
             assert field in props
@@ -147,6 +152,8 @@ class TestParseResponse:
         assert analysis.image_score == 6.5
         assert analysis.heating_type_visible == "gas_boiler"
         assert analysis.deal_breakers == ["old_fuse_box"]
+        assert analysis.natural_light_score == 2
+        assert analysis.natural_light_notes.startswith("Good daylight")
 
     def test_strips_markdown_fence(self):
         content = '```json\n{"condition_tier": "luxury", "image_score": 9}\n```'
@@ -160,6 +167,12 @@ class TestParseResponse:
         assert analysis.image_score == 10.0
         assert analysis.estimated_renovation_cost_eur_per_sqm == 0
         assert analysis.condition_tier == "unknown"
+
+    @pytest.mark.parametrize("value", [0, 6, 3.5, "bad"])
+    def test_invalid_natural_light_score_is_unknown(self, value):
+        content = json.dumps({"natural_light_score": value})
+        analysis = parse_analysis_response(content, "t1")
+        assert analysis.natural_light_score is None
 
     def test_rejects_enum_out_of_choices(self):
         content = json.dumps({"condition_tier": "banana", "image_score": 5})
@@ -185,6 +198,28 @@ class TestEvaluator:
         assert analysis.condition_tier == "habitable_dated"
         assert analysis.image_score == 6.5
         assert analysis.deal_breakers == ["old_fuse_box"]
+        assert analysis.natural_light_score == 2
+
+    def test_empty_narrative_is_retried(self):
+        calls = {"n": 0}
+        empty = json.loads(valid_ollama_content())
+        empty["reasoning"] = ""
+        empty["natural_light_notes"] = ""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/api/chat":
+                calls["n"] += 1
+                content = json.dumps(empty) if calls["n"] == 1 else valid_ollama_content()
+                return httpx.Response(200, json={"message": {"content": content}})
+            return _IMAGE_RESPONSE
+
+        evaluator = VisionEvaluator(
+            make_config(), Database(":memory:"), transport=httpx.MockTransport(handler)
+        )
+        analysis = asyncio.run(evaluator.evaluate_listing(make_listing()))
+        assert calls["n"] == 2
+        assert analysis is not None
+        assert analysis.reasoning
 
     def test_no_images_returns_none_without_calling_llm(self):
         transport = httpx.MockTransport(lambda req: pytest.fail("unexpected call"))
@@ -257,6 +292,8 @@ class TestDbPersistence:
                 listing_id="x1",
                 condition_tier="luxury",
                 image_score=9.1,
+                natural_light_score=1,
+                natural_light_notes="Bright rooms with large windows.",
                 reasoning="High-end finish.",
             )
             await db.save_vision_analysis("x1", analysis, model="gemma4:26b", images_used=3)
@@ -264,6 +301,8 @@ class TestDbPersistence:
             assert loaded is not None
             assert loaded.condition_tier == "luxury"
             assert loaded.image_score == 9.1
+            assert loaded.natural_light_score == 1
+            assert loaded.natural_light_notes == "Bright rooms with large windows."
             assert loaded.reasoning == "High-end finish."
             await db.close()
 

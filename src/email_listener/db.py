@@ -191,6 +191,16 @@ class Database:
             rows = await cur.fetchall()
             return [self._row_to_listing(row) for row in rows]
 
+    async def get_listings_for_zone_pricing(self) -> list[Listing]:
+        """Return every listing with enough data to contribute to zone averages."""
+        async with self._db.execute(
+            """SELECT * FROM listings
+               WHERE price_eur IS NOT NULL AND price_eur > 0
+                 AND sqm IS NOT NULL AND sqm > 0"""
+        ) as cur:
+            rows = await cur.fetchall()
+            return [self._row_to_listing(row) for row in rows]
+
     async def get_deal_listings(self) -> list[Listing]:
         """Listings flagged as qualifying deals (pipeline_results.is_deal = 1)."""
         async with self._db.execute(
@@ -355,6 +365,9 @@ class Database:
                 "avg_price_sqm": zone_match.avg_price_sqm,
                 "matched": zone_match.matched,
                 "method": zone_match.method,
+                "sector": zone_match.sector,
+                "neighborhood": zone_match.neighborhood,
+                "kind": zone_match.kind.value,
             },
             "financial": {
                 "verdict": financial.verdict.value,

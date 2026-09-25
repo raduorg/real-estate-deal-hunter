@@ -26,6 +26,7 @@ class PageExtraction(BaseModel):
     source: ListingSource = ListingSource.UNKNOWN
     title: str = ""
     description: str = ""
+    body_text: str = ""
     price_eur: int | None = None
     sqm: float | None = None
     rooms: int | None = None

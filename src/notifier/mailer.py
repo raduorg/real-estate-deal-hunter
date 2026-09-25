@@ -14,7 +14,11 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from src.config import NotifierConfig
-from src.notifier.digest_builder import DigestDeal, build_digest_html
+from src.notifier.digest_builder import (
+    DigestDeal,
+    build_digest_html,
+    is_digest_eligible,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +38,16 @@ def send_digest_email(
         logger.info("No qualifying deals in this batch; email skipped")
         return False
 
+    eligible_deals = [deal for deal in deals if is_digest_eligible(deal)]
+    if not eligible_deals:
+        logger.info("No digest-eligible deals after natural-light filter; email skipped")
+        return False
+
     if not all([cfg.smtp_user, cfg.smtp_password, cfg.recipient]):
         logger.error("Missing SMTP or recipient credentials in config")
         return False
 
-    sorted_deals = sorted(deals, key=lambda d: d.deal.deal_score, reverse=True)
+    sorted_deals = sorted(eligible_deals, key=lambda d: d.deal.deal_score, reverse=True)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = (

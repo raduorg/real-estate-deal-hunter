@@ -15,7 +15,7 @@ import logging
 from src.config import load_config
 from src.logging_config import setup_logging
 from src.models.listing import ListingStatus
-from src.notifier.digest_builder import DigestDeal
+from src.notifier.digest_builder import DigestDeal, is_digest_eligible
 from src.notifier.mailer import send_digest_email
 from src.orchestration.graph import PipelineBuilder
 
@@ -27,6 +27,7 @@ async def run_pipeline(limit: int | None = None) -> int:
     builder = PipelineBuilder.from_config(config)
     await builder.db.connect()
     try:
+        await builder.refresh_zone_prices()
         fresh = await builder.db.get_listings_by_status(ListingStatus.NEW)
         total_scanned = len(fresh)
         if limit is not None:
@@ -54,14 +55,20 @@ async def run_pipeline(limit: int | None = None) -> int:
                 bool(deal and deal.is_deal),
             )
             if deal and deal.is_deal:
-                qualifying_deals.append(
-                    DigestDeal(
-                        listing=final_state.get("listing", listing),
-                        deal=deal,
-                        zone=final_state.get("zone_match"),
-                        vision=final_state.get("vision"),
-                    )
+                candidate = DigestDeal(
+                    listing=final_state.get("listing", listing),
+                    deal=deal,
+                    zone=final_state.get("zone_match"),
+                    vision=final_state.get("vision"),
                 )
+                if is_digest_eligible(candidate):
+                    qualifying_deals.append(candidate)
+                else:
+                    logger.info(
+                        "Listing %s excluded from digest: natural_light_score=%s",
+                        listing.id,
+                        candidate.natural_light_score,
+                    )
         logger.info(
             "Pipeline pass finished: %d/%d listings processed",
             processed,

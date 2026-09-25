@@ -20,8 +20,18 @@ from src.extractor.extractor import Extractor
 from src.extractor.fetcher import PageFetcher
 from src.filters import should_exclude
 from src.geocoding.filter import FinancialResult, FinancialVerdict, is_financially_viable
-from src.geocoding.prices import load_zone_prices
-from src.geocoding.zones import ZoneIndex, ZoneMatch, ZoneResolver
+from src.geocoding.prices import (
+    calculate_zone_avg_prices_eur_per_sqm,
+    load_zone_prices,
+)
+from src.geocoding.verify import verify_zone_mentions
+from src.geocoding.zones import (
+    Neighborhood,
+    Sector,
+    ZoneIndex,
+    ZoneMatch,
+    ZoneResolver,
+)
 from src.models.extraction import PageExtraction
 from src.models.listing import Listing, ListingStatus, VisionAnalysis
 from src.orchestration.state import ListingState
@@ -67,6 +77,20 @@ def merge_extraction(listing: Listing, extraction: PageExtraction) -> Listing:
     return listing.model_copy(update=update)
 
 
+def _zone_match_from_name(resolver: ZoneResolver, zone: str, method: str) -> ZoneMatch:
+    neighborhood = Neighborhood.parse(zone)
+    sector = neighborhood.sector if neighborhood is not None else Sector.parse(zone)
+    sector_name = sector.value if sector is not None else None
+    return ZoneMatch(
+        zone=zone,
+        avg_price_sqm=resolver.price_for(zone, sector_name),
+        matched=neighborhood is not None or sector is not None,
+        method=method,
+        sector=sector_name,
+        neighborhood=neighborhood.value if neighborhood is not None else None,
+    )
+
+
 def evaluate_gate(financial: FinancialResult | None) -> str:
     """Stage 4 conditional edge: TOO_EXPENSIVE ends the run; everything else
     (viable, suspicious, insufficient data) proceeds to vision."""
@@ -105,7 +129,9 @@ class PipelineBuilder:
         fetcher = PageFetcher(config.extractor, transport=transport)
         extractor = Extractor(fetcher, db, max_images=config.extractor.max_images)
         resolver = ZoneResolver(
-            ZoneIndex(config.zones.geojson_path), prices=load_zone_prices()
+            ZoneIndex(config.zones.geojson_path),
+            prices=load_zone_prices(),
+            fallback_city=config.zones.fallback_city,
         )
         vision_evaluator = VisionEvaluator(config, db, transport=vision_transport)
         return cls(
@@ -119,6 +145,17 @@ class PipelineBuilder:
     async def close(self) -> None:
         await self.extractor.fetcher.close()
         await self.db.close()
+
+    async def refresh_zone_prices(self) -> dict[str, float]:
+        listings = await self.db.get_listings_for_zone_pricing()
+        derived_prices = calculate_zone_avg_prices_eur_per_sqm(
+            listings,
+            self.resolver,
+            fallback_zone=self.config.zones.fallback_city,
+        )
+        prices = load_zone_prices(derived_prices=derived_prices)
+        self.resolver.replace_prices(prices)
+        return prices
 
     # ------------------------------------------------------------------ nodes
 
@@ -202,14 +239,52 @@ class PipelineBuilder:
 
     async def verify_zone(self, state: ListingState) -> dict[str, object]:
         listing = state["listing"]
-        match = self.resolver.resolve(listing)
+        extraction = state.get("extraction")
+        body_text = extraction.body_text if extraction is not None else ""
+        match = self.resolver.resolve(listing, body_text=body_text)
+        verification = verify_zone_mentions(
+            listing,
+            body_text=body_text,
+            known_zones=(
+                set(self.resolver.price_keys)
+                | {sector.value for sector in Sector}
+                | {neighborhood.value for neighborhood in Neighborhood}
+            ),
+            include_neighborhoods=True,
+        )
+        if verification.discrepancy and verification.corrected_zone and (
+            not match.neighborhood or verification.corrected_zone != match.neighborhood
+        ):
+            previous = match.zone or "unresolved"
+            match = _zone_match_from_name(
+                self.resolver,
+                verification.corrected_zone,
+                "description_discrepancy",
+            )
+            logger.info(
+                "Listing %s zone overridden by description: %s -> %s",
+                listing.id,
+                previous,
+                verification.corrected_zone,
+            )
+        elif not match.matched and verification.corrected_zone:
+            match = _zone_match_from_name(
+                self.resolver,
+                verification.corrected_zone,
+                "description",
+            )
+            logger.info(
+                "Listing %s zone set from description: %s",
+                listing.id,
+                verification.corrected_zone,
+            )
         logger.info(
             "Listing %s zone resolved: zone=%r method=%s",
             listing.id,
             match.zone,
             match.method,
         )
-        return {"zone_match": match}
+        return {"zone_match": match, "zone_verification": verification}
 
     async def financial(self, state: ListingState) -> dict[str, object]:
         listing = state["listing"]
@@ -282,6 +357,7 @@ class PipelineBuilder:
             discount_weight=self.config.deals.discount_weight,
             condition_weight=self.config.deals.condition_weight,
             seismic_weight=self.config.deals.seismic_weight,
+            natural_light_weight=self.config.deals.natural_light_weight,
         )
         if financial is None:
             financial = FinancialResult(
@@ -299,12 +375,13 @@ class PipelineBuilder:
             deal=deal,
         )
         logger.info(
-            "Listing %s valued: adjusted=%.2f EUR/sqm discount=%.2f%% deal=%s score=%.1f",
+            "Listing %s valued: adjusted=%.2f EUR/sqm discount=%.2f%% deal=%s score=%.1f light=%s",
             listing.id,
             deal.adjusted_price_per_sqm,
             deal.discount_percentage,
             deal.is_deal,
             deal.deal_score,
+            deal.natural_light_score,
         )
         return {"deal": deal}
 

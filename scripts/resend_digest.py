@@ -16,8 +16,8 @@ from src.config import load_config
 from src.email_listener.db import Database
 from src.geocoding.zones import ZoneMatch
 from src.logging_config import setup_logging
-from src.models.listing import DealScore, Listing, VisionAnalysis
-from src.notifier.digest_builder import DigestDeal
+from src.models.listing import DealScore, Listing
+from src.notifier.digest_builder import DigestDeal, is_digest_eligible
 from src.notifier.mailer import send_digest_email
 
 TOTAL_SCANNED_SOURCE_RUN = 172
@@ -63,9 +63,12 @@ async def digest_deal(db: Database, listing: Listing) -> DigestDeal | None:
         avg_price_sqm=zone_raw.get("avg_price_sqm"),
         matched=zone_raw.get("matched") or False,
         method=zone_raw.get("method") or "",
+        sector=zone_raw.get("sector"),
+        neighborhood=zone_raw.get("neighborhood"),
     )
     vision = await db.get_vision_analysis(listing.id)
-    return DigestDeal(listing=listing, deal=deal, zone=zone, vision=vision)
+    candidate = DigestDeal(listing=listing, deal=deal, zone=zone, vision=vision)
+    return candidate if is_digest_eligible(candidate) else None
 
 
 if __name__ == "__main__":
